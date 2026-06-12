@@ -2,27 +2,44 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { analyzeImage, astmGrainNumber } from '../lib/analysis'
 
-const MAX_ANALYSIS_DIMENSION = 2400
+// Canny runs on every slider tick, so cap the analysis resolution to keep it
+// interactive. sampleScale corrects the µm conversion for the downscale.
+const MAX_ANALYSIS_DIMENSION = 1600
 
 const inputClasses =
   'mt-1 block w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500'
+
+const secondaryButtonClasses =
+  'rounded-md border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-300 hover:bg-slate-800'
+
+function lineLength(line) {
+  if (!line) return 0
+  return Math.hypot(line.x2 - line.x1, line.y2 - line.y1)
+}
 
 export default function Dashboard() {
   const { user, signOut } = useAuth()
   const canvasRef = useRef(null)
   const fileInputRef = useRef(null)
+  const draggingRef = useRef(false)
 
   const [source, setSource] = useState(null) // { canvas, imageData, sampleScale, fileName, width, height }
   const [loadError, setLoadError] = useState(null)
   const [dragActive, setDragActive] = useState(false)
 
+  const [method, setMethod] = useState('canny')
   const [magnification, setMagnification] = useState(100)
   const [scaleOverride, setScaleOverride] = useState(null)
   const [numLines, setNumLines] = useState(7)
   const [sensitivity, setSensitivity] = useState(0)
+  const [showBoundaries, setShowBoundaries] = useState(true)
 
-  // µm per pixel of the original image. Rule-of-thumb default (1 µm/px at 100x)
-  // until scale bar calibration ships in V2 — always editable.
+  // Scale bar calibration: mode 'idle' | 'drawing' | 'measured'
+  const [calibration, setCalibration] = useState({ mode: 'idle', line: null, realMicrons: '' })
+  const [calibrated, setCalibrated] = useState(null) // { realMicrons, lengthPx }
+
+  // µm per pixel of the original image. Until calibrated from the scale bar,
+  // falls back to a rule-of-thumb estimate from magnification (1 µm/px at 100x).
   const scale = scaleOverride ?? (magnification > 0 ? 100 / magnification : 1)
 
   async function loadFile(file) {
@@ -51,6 +68,9 @@ export default function Dashboard() {
         width,
         height,
       })
+      // Line coordinates are meaningless on a new image; the calibrated µm/px
+      // remains valid for images from the same microscope setup, so keep it.
+      setCalibration({ mode: 'idle', line: null, realMicrons: '' })
     } catch {
       setLoadError('Could not decode that image. Use PNG, JPEG, BMP or WebP (export TIFFs to PNG first).')
     }
@@ -63,8 +83,8 @@ export default function Dashboard() {
   }
 
   const result = useMemo(
-    () => (source ? analyzeImage(source.imageData, { numLines, sensitivity }) : null),
-    [source, numLines, sensitivity],
+    () => (source ? analyzeImage(source.imageData, { numLines, sensitivity, method }) : null),
+    [source, numLines, sensitivity, method],
   )
 
   // µm represented by one pixel of the (possibly downscaled) analysis image.
@@ -79,6 +99,25 @@ export default function Dashboard() {
     canvas.height = source.height
     const ctx = canvas.getContext('2d')
     ctx.drawImage(source.canvas, 0, 0)
+
+    if (showBoundaries) {
+      const overlay = new ImageData(source.width, source.height)
+      const od = overlay.data
+      for (let i = 0; i < result.mask.length; i++) {
+        if (result.mask[i]) {
+          const o = i * 4
+          od[o] = 250
+          od[o + 1] = 204
+          od[o + 2] = 21
+          od[o + 3] = 150
+        }
+      }
+      const tmp = document.createElement('canvas')
+      tmp.width = source.width
+      tmp.height = source.height
+      tmp.getContext('2d').putImageData(overlay, 0, 0)
+      ctx.drawImage(tmp, 0, 0)
+    }
 
     const lineWidth = Math.max(1.5, source.width / 900)
     ctx.lineWidth = lineWidth
@@ -98,7 +137,77 @@ export default function Dashboard() {
         ctx.stroke()
       }
     }
-  }, [source, result])
+
+    if (calibration.line) {
+      const { x1, y1, x2, y2 } = calibration.line
+      ctx.strokeStyle = '#f8fafc'
+      ctx.lineWidth = lineWidth * 1.5
+      ctx.beginPath()
+      ctx.moveTo(x1, y1)
+      ctx.lineTo(x2, y2)
+      ctx.stroke()
+      // End caps
+      const cap = Math.max(8, source.width / 200)
+      const angle = Math.atan2(y2 - y1, x2 - x1) + Math.PI / 2
+      const cx = Math.cos(angle) * cap
+      const cy = Math.sin(angle) * cap
+      for (const [px, py] of [
+        [x1, y1],
+        [x2, y2],
+      ]) {
+        ctx.beginPath()
+        ctx.moveTo(px - cx / 2, py - cy / 2)
+        ctx.lineTo(px + cx / 2, py + cy / 2)
+        ctx.stroke()
+      }
+    }
+  }, [source, result, showBoundaries, calibration.line])
+
+  function toCanvasCoords(e) {
+    const canvas = canvasRef.current
+    const rect = canvas.getBoundingClientRect()
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (canvas.height / rect.height),
+    }
+  }
+
+  function handlePointerDown(e) {
+    if (calibration.mode !== 'drawing') return
+    draggingRef.current = true
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const p = toCanvasCoords(e)
+    setCalibration((c) => ({ ...c, line: { x1: p.x, y1: p.y, x2: p.x, y2: p.y } }))
+  }
+
+  function handlePointerMove(e) {
+    if (!draggingRef.current) return
+    const p = toCanvasCoords(e)
+    setCalibration((c) => ({ ...c, line: { ...c.line, x2: p.x, y2: p.y } }))
+  }
+
+  function handlePointerUp() {
+    if (!draggingRef.current) return
+    draggingRef.current = false
+    setCalibration((c) =>
+      lineLength(c.line) > 5 ? { ...c, mode: 'measured' } : { ...c, line: null },
+    )
+  }
+
+  function applyCalibration() {
+    const lengthPx = lineLength(calibration.line)
+    const real = Number(calibration.realMicrons)
+    if (!real || real <= 0 || lengthPx === 0) return
+    setScaleOverride(real / (lengthPx * source.sampleScale))
+    setCalibrated({ realMicrons: real, lengthPx })
+    setCalibration((c) => ({ ...c, mode: 'idle', realMicrons: '' }))
+  }
+
+  function clearCalibration() {
+    setScaleOverride(null)
+    setCalibrated(null)
+    setCalibration({ mode: 'idle', line: null, realMicrons: '' })
+  }
 
   return (
     <div className="min-h-screen bg-slate-950">
@@ -109,10 +218,7 @@ export default function Dashboard() {
           </h1>
           <div className="flex items-center gap-4">
             <span className="text-sm text-slate-400">{user?.email}</span>
-            <button
-              onClick={signOut}
-              className="rounded-md border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-300 hover:bg-slate-800"
-            >
+            <button onClick={signOut} className={secondaryButtonClasses}>
               Sign out
             </button>
           </div>
@@ -156,7 +262,7 @@ export default function Dashboard() {
                 </p>
                 <button
                   onClick={() => fileInputRef.current.click()}
-                  className="mt-3 w-full rounded-md border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-300 hover:bg-slate-800"
+                  className={`mt-3 w-full ${secondaryButtonClasses}`}
                 >
                   Replace image
                 </button>
@@ -171,43 +277,146 @@ export default function Dashboard() {
                 <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
                   Calibration
                 </h2>
-                <label htmlFor="magnification" className="mt-3 block text-sm font-medium text-slate-300">
-                  Magnification (×)
-                </label>
-                <input
-                  id="magnification"
-                  type="number"
-                  min="1"
-                  value={magnification}
-                  onChange={(e) => {
-                    setMagnification(Number(e.target.value))
-                    setScaleOverride(null)
-                  }}
-                  className={inputClasses}
-                />
-                <label htmlFor="scale" className="mt-4 block text-sm font-medium text-slate-300">
-                  Scale (µm/pixel)
-                </label>
-                <input
-                  id="scale"
-                  type="number"
-                  min="0.001"
-                  step="0.01"
-                  value={Number(scale.toFixed(4))}
-                  onChange={(e) => setScaleOverride(Number(e.target.value))}
-                  className={inputClasses}
-                />
-                <p className="mt-2 text-xs text-slate-500">
-                  Auto-estimated from magnification (assumes 1 µm/px at 100×). Override with your
-                  microscope&apos;s calibrated value for accurate results.
-                </p>
+
+                {calibration.mode === 'idle' && (
+                  <button
+                    onClick={() => setCalibration((c) => ({ ...c, mode: 'drawing', line: null }))}
+                    className="mt-3 w-full rounded-md bg-teal-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                  >
+                    Calibrate from scale bar
+                  </button>
+                )}
+                {calibration.mode === 'drawing' && (
+                  <div className="mt-3 space-y-3">
+                    <p className="rounded-md bg-teal-500/10 px-3 py-2 text-sm text-teal-300">
+                      Drag a line along the scale bar on the image.
+                    </p>
+                    <button
+                      onClick={() => setCalibration({ mode: 'idle', line: null, realMicrons: '' })}
+                      className={`w-full ${secondaryButtonClasses}`}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+                {calibration.mode === 'measured' && (
+                  <div className="mt-3 space-y-3">
+                    <p className="text-sm text-slate-300">
+                      Measured <span className="text-teal-400">{lineLength(calibration.line).toFixed(1)} px</span>
+                    </p>
+                    <div>
+                      <label htmlFor="real-microns" className="block text-sm font-medium text-slate-300">
+                        Scale bar length (µm)
+                      </label>
+                      <input
+                        id="real-microns"
+                        type="number"
+                        min="0.001"
+                        step="any"
+                        value={calibration.realMicrons}
+                        onChange={(e) =>
+                          setCalibration((c) => ({ ...c, realMicrons: e.target.value }))
+                        }
+                        className={inputClasses}
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={applyCalibration}
+                        disabled={!Number(calibration.realMicrons)}
+                        className="flex-1 rounded-md bg-teal-500 px-3 py-1.5 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        Apply
+                      </button>
+                      <button
+                        onClick={() =>
+                          setCalibration((c) => ({ ...c, mode: 'drawing', line: null }))
+                        }
+                        className={`flex-1 ${secondaryButtonClasses}`}
+                      >
+                        Redraw
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {calibrated ? (
+                  <div className="mt-4 rounded-md border border-teal-500/30 bg-teal-500/5 px-3 py-2">
+                    <p className="text-sm text-teal-300">
+                      Calibrated: {scale.toFixed(4)} µm/px
+                    </p>
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      {calibrated.realMicrons} µm over {calibrated.lengthPx.toFixed(1)} px
+                    </p>
+                    <button
+                      onClick={clearCalibration}
+                      className="mt-2 text-xs font-medium text-slate-400 underline hover:text-slate-300"
+                    >
+                      Clear calibration
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <label
+                      htmlFor="magnification"
+                      className="mt-4 block text-sm font-medium text-slate-300"
+                    >
+                      Magnification (×)
+                    </label>
+                    <input
+                      id="magnification"
+                      type="number"
+                      min="1"
+                      value={magnification}
+                      onChange={(e) => {
+                        setMagnification(Number(e.target.value))
+                        setScaleOverride(null)
+                      }}
+                      className={inputClasses}
+                    />
+                    <label htmlFor="scale" className="mt-4 block text-sm font-medium text-slate-300">
+                      Scale (µm/pixel)
+                    </label>
+                    <input
+                      id="scale"
+                      type="number"
+                      min="0.001"
+                      step="0.01"
+                      value={Number(scale.toFixed(4))}
+                      onChange={(e) => setScaleOverride(Number(e.target.value))}
+                      className={inputClasses}
+                    />
+                    <p className="mt-2 text-xs text-slate-500">
+                      Rough estimate from magnification (assumes 1 µm/px at 100×). For accurate
+                      results, calibrate from the scale bar above.
+                    </p>
+                  </>
+                )}
               </section>
 
               <section className="rounded-xl border border-slate-800 bg-slate-900 p-5">
                 <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
-                  Test lines
+                  Detection
                 </h2>
-                <label htmlFor="num-lines" className="mt-3 block text-sm font-medium text-slate-300">
+                <label htmlFor="method" className="mt-3 block text-sm font-medium text-slate-300">
+                  Boundary detection method
+                </label>
+                <select
+                  id="method"
+                  value={method}
+                  onChange={(e) => setMethod(e.target.value)}
+                  className={inputClasses}
+                >
+                  <option value="canny">Edge detection (Canny) — recommended</option>
+                  <option value="threshold">Dark threshold (legacy)</option>
+                </select>
+                <p className="mt-2 text-xs text-slate-500">
+                  Edge detection finds boundaries by contrast change, so it works whether
+                  boundaries etch dark or bright (e.g. Barker&apos;s etched aluminium). Dark
+                  threshold only suits dark-etched boundaries.
+                </p>
+
+                <label htmlFor="num-lines" className="mt-4 block text-sm font-medium text-slate-300">
                   Number of lines: <span className="text-teal-400">{numLines}</span>
                 </label>
                 <input
@@ -219,6 +428,7 @@ export default function Dashboard() {
                   onChange={(e) => setNumLines(Number(e.target.value))}
                   className="mt-2 w-full accent-teal-500"
                 />
+
                 <label htmlFor="sensitivity" className="mt-4 block text-sm font-medium text-slate-300">
                   Detection sensitivity: <span className="text-teal-400">{sensitivity}</span>
                 </label>
@@ -234,6 +444,16 @@ export default function Dashboard() {
                 <p className="mt-2 text-xs text-slate-500">
                   Raise if boundaries are being missed, lower if noise is counted as boundaries.
                 </p>
+
+                <label className="mt-4 flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={showBoundaries}
+                    onChange={(e) => setShowBoundaries(e.target.checked)}
+                    className="accent-teal-500"
+                  />
+                  Highlight detected boundaries
+                </label>
               </section>
 
               <section className="rounded-xl border border-teal-500/30 bg-slate-900 p-5">
@@ -260,9 +480,24 @@ export default function Dashboard() {
                         {((result.totalLengthPx * micronsPerAnalysisPx) / 1000).toFixed(2)} mm
                       </dd>
                     </div>
+                    {result.detail.threshold !== undefined ? (
+                      <div className="flex justify-between text-sm">
+                        <dt className="text-slate-500">Threshold used</dt>
+                        <dd className="text-slate-300">{result.detail.threshold}</dd>
+                      </div>
+                    ) : (
+                      <div className="flex justify-between text-sm">
+                        <dt className="text-slate-500">Edge thresholds (low–high)</dt>
+                        <dd className="text-slate-300">
+                          {result.detail.lowThreshold}–{result.detail.highThreshold}
+                        </dd>
+                      </div>
+                    )}
                     <div className="flex justify-between text-sm">
-                      <dt className="text-slate-500">Threshold used</dt>
-                      <dd className="text-slate-300">{result.threshold}</dd>
+                      <dt className="text-slate-500">Scale source</dt>
+                      <dd className="text-slate-300">
+                        {calibrated ? 'Scale bar' : 'Magnification estimate'}
+                      </dd>
                     </div>
                   </dl>
                 ) : (
@@ -282,7 +517,14 @@ export default function Dashboard() {
             <section>
               <canvas
                 ref={canvasRef}
-                className="h-auto max-w-full rounded-xl border border-slate-800"
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                className={`h-auto max-w-full touch-none rounded-xl border ${
+                  calibration.mode === 'drawing'
+                    ? 'cursor-crosshair border-teal-500/60'
+                    : 'border-slate-800'
+                }`}
               />
               <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-slate-500">
                 <span>
@@ -291,6 +533,16 @@ export default function Dashboard() {
                 <span>
                   <span className="font-semibold text-rose-400">|</span> grain boundary intercepts
                 </span>
+                {showBoundaries && (
+                  <span>
+                    <span className="font-semibold text-yellow-400">▒</span> detected boundaries
+                  </span>
+                )}
+                {calibration.line && (
+                  <span>
+                    <span className="font-semibold text-slate-100">⊢⊣</span> scale bar measurement
+                  </span>
+                )}
                 <span className="ml-auto text-teal-400/80">
                   Processed in your browser — never uploaded, never stored.
                 </span>
