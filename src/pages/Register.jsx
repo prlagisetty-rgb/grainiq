@@ -3,6 +3,9 @@ import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import AuthLayout from '../components/AuthLayout'
 
+const inputClasses =
+  'mt-1 block w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500'
+
 export default function Register() {
   const { session, signUp } = useAuth()
   const navigate = useNavigate()
@@ -20,12 +23,12 @@ export default function Register() {
   if (awaitingConfirmation) {
     return (
       <AuthLayout title="Check your email" subtitle={`We sent a confirmation link to ${email}.`}>
-        <p className="text-sm text-slate-600">
+        <p className="text-sm text-slate-300">
           Click the link in the email to activate your account, then sign in.
         </p>
         <Link
           to="/login"
-          className="mt-6 block w-full rounded-md bg-blue-600 px-4 py-2 text-center text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+          className="mt-6 block w-full rounded-md bg-teal-500 px-4 py-2 text-center text-sm font-semibold text-slate-950 shadow-sm hover:bg-teal-400"
         >
           Go to sign in
         </Link>
@@ -66,7 +69,7 @@ export default function Register() {
     >
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label htmlFor="email" className="block text-sm font-medium text-slate-700">
+          <label htmlFor="email" className="block text-sm font-medium text-slate-300">
             Email
           </label>
           <input
@@ -76,12 +79,12 @@ export default function Register() {
             autoComplete="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className={inputClasses}
           />
         </div>
 
         <div>
-          <label htmlFor="password" className="block text-sm font-medium text-slate-700">
+          <label htmlFor="password" className="block text-sm font-medium text-slate-300">
             Password
           </label>
           <input
@@ -92,13 +95,13 @@ export default function Register() {
             autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className={inputClasses}
           />
-          <p className="mt-1 text-xs text-slate-400">At least 8 characters</p>
+          <p className="mt-1 text-xs text-slate-500">At least 8 characters</p>
         </div>
 
         <div>
-          <label htmlFor="confirm-password" className="block text-sm font-medium text-slate-700">
+          <label htmlFor="confirm-password" className="block text-sm font-medium text-slate-300">
             Confirm password
           </label>
           <input
@@ -108,12 +111,12 @@ export default function Register() {
             autoComplete="new-password"
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className={inputClasses}
           />
         </div>
 
         {error && (
-          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+          <p role="alert" className="rounded-md bg-red-950/60 px-3 py-2 text-sm text-red-400">
             {error}
           </p>
         )}
@@ -121,15 +124,15 @@ export default function Register() {
         <button
           type="submit"
           disabled={submitting}
-          className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          className="w-full rounded-md bg-teal-500 px-4 py-2 text-sm font-semibold text-slate-950 shadow-sm hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {submitting ? 'Creating account…' : 'Create account'}
         </button>
       </form>
 
-      <p className="mt-6 text-center text-sm text-slate-500">
+      <p className="mt-6 text-center text-sm text-slate-400">
         Already have an account?{' '}
-        <Link to="/login" className="font-medium text-blue-600 hover:text-blue-700">
+        <Link to="/login" className="font-medium text-teal-400 hover:text-teal-300">
           Sign in
         </Link>
       </p>

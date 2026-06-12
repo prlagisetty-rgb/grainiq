@@ -3,6 +3,9 @@ import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import AuthLayout from '../components/AuthLayout'
 
+const inputClasses =
+  'mt-1 block w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500'
+
 export default function Login() {
   const { session, signIn } = useAuth()
   const navigate = useNavigate()
@@ -34,7 +37,7 @@ export default function Login() {
     <AuthLayout title="Sign in" subtitle="Welcome back. Sign in to run your analyses.">
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label htmlFor="email" className="block text-sm font-medium text-slate-700">
+          <label htmlFor="email" className="block text-sm font-medium text-slate-300">
             Email
           </label>
           <input
@@ -44,12 +47,12 @@ export default function Login() {
             autoComplete="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className={inputClasses}
           />
         </div>
 
         <div>
-          <label htmlFor="password" className="block text-sm font-medium text-slate-700">
+          <label htmlFor="password" className="block text-sm font-medium text-slate-300">
             Password
           </label>
           <input
@@ -59,12 +62,12 @@ export default function Login() {
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className={inputClasses}
           />
         </div>
 
         {error && (
-          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+          <p role="alert" className="rounded-md bg-red-950/60 px-3 py-2 text-sm text-red-400">
             {error}
           </p>
         )}
@@ -72,15 +75,15 @@ export default function Login() {
         <button
           type="submit"
           disabled={submitting}
-          className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          className="w-full rounded-md bg-teal-500 px-4 py-2 text-sm font-semibold text-slate-950 shadow-sm hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
 
-      <p className="mt-6 text-center text-sm text-slate-500">
+      <p className="mt-6 text-center text-sm text-slate-400">
         No account yet?{' '}
-        <Link to="/register" className="font-medium text-blue-600 hover:text-blue-700">
+        <Link to="/register" className="font-medium text-teal-400 hover:text-teal-300">
           Create one
         </Link>
       </p>
