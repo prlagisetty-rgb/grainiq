@@ -38,22 +38,34 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
     )
-    const { data: profile } = await admin
+    const { data: profile, error: profileError } = await admin
       .from('profiles')
       .select('stripe_customer_id, tier')
       .eq('id', user.id)
       .single()
+    if (profileError) {
+      console.error(`profiles select failed (${user.id}):`, profileError.message)
+      return json({ error: 'Could not load billing profile' }, 500)
+    }
 
-    if (profile?.tier === 'pro') return json({ error: 'Already subscribed' }, 400)
+    if (profile.tier === 'pro') return json({ error: 'Already subscribed' }, 400)
 
-    let customerId = profile?.stripe_customer_id
+    let customerId = profile.stripe_customer_id
     if (!customerId) {
       const customer = await stripe.customers.create({
         email: user.email,
         metadata: { supabase_user_id: user.id },
       })
       customerId = customer.id
-      await admin.from('profiles').update({ stripe_customer_id: customerId }).eq('id', user.id)
+      const { error: saveError } = await admin
+        .from('profiles')
+        .update({ stripe_customer_id: customerId, updated_at: new Date().toISOString() })
+        .eq('id', user.id)
+      // Don't abort checkout — the webhook also writes the customer id on
+      // checkout.session.completed — but make the failure visible in logs.
+      if (saveError) {
+        console.error(`stripe_customer_id save failed (${user.id}):`, saveError.message)
+      }
     }
 
     const { returnUrl } = await req.json()

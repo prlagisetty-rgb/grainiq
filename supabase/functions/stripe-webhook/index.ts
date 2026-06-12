@@ -28,36 +28,66 @@ Deno.serve(async (req) => {
     return new Response('Webhook signature verification failed', { status: 400 })
   }
 
+  // A failed tier update must return 5xx so Stripe retries the event.
+  async function applyUpdate(
+    values: Record<string, unknown>,
+    column: string,
+    match: string,
+  ): Promise<Response | null> {
+    const { data, error } = await admin
+      .from('profiles')
+      .update({ ...values, updated_at: new Date().toISOString() })
+      .eq(column, match)
+      .select('id')
+    if (error) {
+      console.error(`profiles update failed (${event.type}, ${column}=${match}):`, error.message)
+      return new Response('Profile update failed', { status: 500 })
+    }
+    if (!data || data.length === 0) {
+      console.error(`profiles update matched no rows (${event.type}, ${column}=${match})`)
+      return new Response('Profile not found', { status: 500 })
+    }
+    console.log(`profiles updated (${event.type}, ${column}=${match}):`, JSON.stringify(values))
+    return null
+  }
+
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session
       const userId = session.metadata?.supabase_user_id
       if (userId && session.mode === 'subscription') {
-        await admin
-          .from('profiles')
-          .update({
+        const failure = await applyUpdate(
+          {
             tier: 'pro',
+            stripe_customer_id: session.customer as string,
             stripe_subscription_id: session.subscription as string,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', userId)
+          },
+          'id',
+          userId,
+        )
+        if (failure) return failure
       }
       break
     }
     case 'customer.subscription.updated':
     case 'customer.subscription.deleted': {
       const sub = event.data.object as Stripe.Subscription
+      // 'incomplete' is a transient pre-payment state: a subscription.updated
+      // event carrying it can arrive after checkout.session.completed and must
+      // not downgrade a freshly upgraded account.
+      if (event.type === 'customer.subscription.updated' && sub.status === 'incomplete') break
       const active =
         event.type !== 'customer.subscription.deleted' &&
-        (sub.status === 'active' || sub.status === 'trialing')
-      await admin
-        .from('profiles')
-        .update({
+        (sub.status === 'active' || sub.status === 'trialing' || sub.status === 'past_due')
+      const failure = await applyUpdate(
+        {
           tier: active ? 'pro' : 'free',
           stripe_subscription_id: active ? sub.id : null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('stripe_customer_id', sub.customer as string)
+        },
+        'stripe_customer_id',
+        sub.customer as string,
+      )
+      if (failure) return failure
       break
     }
   }

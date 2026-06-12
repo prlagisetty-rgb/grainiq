@@ -78,3 +78,11 @@ $$;
 create policy "Users can record analyses within their tier limit"
   on public.analyses for insert
   with check (auth.uid() = user_id and public.can_run_analysis(auth.uid()));
+
+-- Explicit grants: RLS policies only filter rows — the roles also need table
+-- privileges, and depending on which role runs this migration the default
+-- privilege grants may not apply.
+grant select on public.profiles to authenticated;
+grant select, insert, update, delete on public.profiles to service_role;
+grant select, insert on public.analyses to authenticated;
+grant select, insert, update, delete on public.analyses to service_role;
