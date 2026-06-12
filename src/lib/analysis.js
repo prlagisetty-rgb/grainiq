@@ -222,21 +222,47 @@ export function cannyEdges(gray, width, height, sensitivity = 0) {
 // MLI analysis
 // ---------------------------------------------------------------------------
 
+// Walk one test line through the boundary mask. getIndex maps the moving
+// coordinate to a mask index; a transition into a boundary pixel counts as one
+// intercept, with minSpacing suppressing double counts from noise or thick
+// boundaries.
+function walkLine(mask, getIndex, from, to, minSpacing) {
+  const intercepts = []
+  let inBoundary = false
+  let lastIntercept = -Infinity
+
+  for (let p = from; p < to; p++) {
+    const isBoundary = mask[getIndex(p)] === 1
+    if (isBoundary && !inBoundary) {
+      if (p - lastIntercept >= minSpacing) {
+        intercepts.push(p)
+        lastIntercept = p
+      }
+      inBoundary = true
+    } else if (!isBoundary) {
+      inBoundary = false
+    }
+  }
+  return intercepts
+}
+
 /**
  * Run MLI analysis on an image.
  *
- * Horizontal test lines are spaced evenly down the image (5% margin on all
- * sides). Walking each line, a transition into a boundary pixel counts as one
- * intercept. minSpacing suppresses double counts from noise or thick
- * boundaries.
+ * Test lines are spaced evenly across the image (5% margin on all sides) in
+ * the requested orientation(s). 'both' (the ASTM E112-recommended default)
+ * places numLines in each direction — never fewer than 3 per direction — so
+ * the measurement averages over grain elongation.
  *
  * Returns geometry in pixels; the caller converts to µm via its scale factor.
- * `mask` is the per-pixel boundary map (Uint8Array, 1 = boundary) for overlay
- * rendering.
+ * Each entry in `lines` carries its orientation ('horizontal' lines have
+ * {y, x1, x2}, 'vertical' have {x, y1, y2}; intercepts are the moving
+ * coordinate). `directions` holds per-orientation totals. `mask` is the
+ * per-pixel boundary map (Uint8Array, 1 = boundary) for overlay rendering.
  */
 export function analyzeImage(
   imageData,
-  { numLines = 7, sensitivity = 0, minSpacing = 8, method = 'canny' } = {},
+  { numLines = 7, sensitivity = 0, minSpacing = 8, method = 'canny', orientation = 'both' } = {},
 ) {
   const { width, height } = imageData
   const gray = toGrayscale(imageData)
@@ -256,40 +282,68 @@ export function analyzeImage(
 
   const marginX = Math.round(width * 0.05)
   const marginY = Math.round(height * 0.05)
-  const x1 = marginX
-  const x2 = width - marginX
-  const usableHeight = height - 2 * marginY
+  const linesPerDirection = orientation === 'both' ? Math.max(3, numLines) : numLines
 
   const lines = []
-  let totalIntercepts = 0
+  const directions = {}
 
-  for (let n = 0; n < numLines; n++) {
-    const y = Math.round(marginY + ((n + 0.5) / numLines) * usableHeight)
-    const intercepts = []
-    let inBoundary = false
-    let lastIntercept = -Infinity
-
-    for (let x = x1; x < x2; x++) {
-      const isBoundary = mask[y * width + x] === 1
-      if (isBoundary && !inBoundary) {
-        if (x - lastIntercept >= minSpacing) {
-          intercepts.push(x)
-          lastIntercept = x
-        }
-        inBoundary = true
-      } else if (!isBoundary) {
-        inBoundary = false
-      }
+  if (orientation === 'horizontal' || orientation === 'both') {
+    const x1 = marginX
+    const x2 = width - marginX
+    const usable = height - 2 * marginY
+    let intercepts = 0
+    for (let n = 0; n < linesPerDirection; n++) {
+      const y = Math.round(marginY + ((n + 0.5) / linesPerDirection) * usable)
+      const hits = walkLine(mask, (x) => y * width + x, x1, x2, minSpacing)
+      lines.push({ orientation: 'horizontal', y, x1, x2, intercepts: hits })
+      intercepts += hits.length
     }
-
-    lines.push({ y, x1, x2, intercepts })
-    totalIntercepts += intercepts.length
+    directions.horizontal = {
+      lines: linesPerDirection,
+      intercepts,
+      lengthPx: (x2 - x1) * linesPerDirection,
+    }
   }
 
-  const totalLengthPx = (x2 - x1) * numLines
+  if (orientation === 'vertical' || orientation === 'both') {
+    const y1 = marginY
+    const y2 = height - marginY
+    const usable = width - 2 * marginX
+    let intercepts = 0
+    for (let n = 0; n < linesPerDirection; n++) {
+      const x = Math.round(marginX + ((n + 0.5) / linesPerDirection) * usable)
+      const hits = walkLine(mask, (y) => y * width + x, y1, y2, minSpacing)
+      lines.push({ orientation: 'vertical', x, y1, y2, intercepts: hits })
+      intercepts += hits.length
+    }
+    directions.vertical = {
+      lines: linesPerDirection,
+      intercepts,
+      lengthPx: (y2 - y1) * linesPerDirection,
+    }
+  }
+
+  let totalIntercepts = 0
+  let totalLengthPx = 0
+  for (const dir of Object.values(directions)) {
+    totalIntercepts += dir.intercepts
+    totalLengthPx += dir.lengthPx
+  }
   const mliPx = totalIntercepts > 0 ? totalLengthPx / totalIntercepts : null
 
-  return { lines, totalIntercepts, totalLengthPx, mliPx, method, detail, mask, width, height }
+  return {
+    lines,
+    directions,
+    orientation,
+    totalIntercepts,
+    totalLengthPx,
+    mliPx,
+    method,
+    detail,
+    mask,
+    width,
+    height,
+  }
 }
 
 // ASTM E112: G = -6.643856 * log10(l̄) - 3.288, with mean intercept length l̄ in mm.

@@ -28,6 +28,7 @@ export default function Dashboard() {
   const [dragActive, setDragActive] = useState(false)
 
   const [method, setMethod] = useState('canny')
+  const [orientation, setOrientation] = useState('both')
   const [magnification, setMagnification] = useState(100)
   const [scaleOverride, setScaleOverride] = useState(null)
   const [numLines, setNumLines] = useState(7)
@@ -83,8 +84,11 @@ export default function Dashboard() {
   }
 
   const result = useMemo(
-    () => (source ? analyzeImage(source.imageData, { numLines, sensitivity, method }) : null),
-    [source, numLines, sensitivity, method],
+    () =>
+      source
+        ? analyzeImage(source.imageData, { numLines, sensitivity, method, orientation })
+        : null,
+    [source, numLines, sensitivity, method, orientation],
   )
 
   // µm represented by one pixel of the (possibly downscaled) analysis image.
@@ -120,20 +124,31 @@ export default function Dashboard() {
     }
 
     const lineWidth = Math.max(1.5, source.width / 900)
+    const tick = Math.max(6, source.width / 240)
     ctx.lineWidth = lineWidth
     for (const line of result.lines) {
+      const horizontal = line.orientation === 'horizontal'
       ctx.strokeStyle = '#2dd4bf'
       ctx.beginPath()
-      ctx.moveTo(line.x1, line.y)
-      ctx.lineTo(line.x2, line.y)
+      if (horizontal) {
+        ctx.moveTo(line.x1, line.y)
+        ctx.lineTo(line.x2, line.y)
+      } else {
+        ctx.moveTo(line.x, line.y1)
+        ctx.lineTo(line.x, line.y2)
+      }
       ctx.stroke()
 
       ctx.strokeStyle = '#fb7185'
-      const tick = Math.max(6, source.width / 240)
-      for (const x of line.intercepts) {
+      for (const p of line.intercepts) {
         ctx.beginPath()
-        ctx.moveTo(x, line.y - tick)
-        ctx.lineTo(x, line.y + tick)
+        if (horizontal) {
+          ctx.moveTo(p, line.y - tick)
+          ctx.lineTo(p, line.y + tick)
+        } else {
+          ctx.moveTo(line.x - tick, p)
+          ctx.lineTo(line.x + tick, p)
+        }
         ctx.stroke()
       }
     }
@@ -416,8 +431,27 @@ export default function Dashboard() {
                   threshold only suits dark-etched boundaries.
                 </p>
 
+                <label htmlFor="orientation" className="mt-4 block text-sm font-medium text-slate-300">
+                  Test line orientation
+                </label>
+                <select
+                  id="orientation"
+                  value={orientation}
+                  onChange={(e) => setOrientation(e.target.value)}
+                  className={inputClasses}
+                >
+                  <option value="both">Horizontal + vertical (ASTM E112 recommended)</option>
+                  <option value="horizontal">Horizontal only</option>
+                  <option value="vertical">Vertical only</option>
+                </select>
+                <p className="mt-2 text-xs text-slate-500">
+                  Combining directions averages over grain elongation; use a single direction to
+                  probe anisotropy.
+                </p>
+
                 <label htmlFor="num-lines" className="mt-4 block text-sm font-medium text-slate-300">
-                  Number of lines: <span className="text-teal-400">{numLines}</span>
+                  {orientation === 'both' ? 'Lines per direction' : 'Number of lines'}:{' '}
+                  <span className="text-teal-400">{numLines}</span>
                 </label>
                 <input
                   id="num-lines"
@@ -470,10 +504,27 @@ export default function Dashboard() {
                       <dt className="text-xs text-slate-500">ASTM grain size number (G)</dt>
                       <dd className="text-2xl font-bold text-white">{grainNumber.toFixed(1)}</dd>
                     </div>
-                    <div className="flex justify-between border-t border-slate-800 pt-3 text-sm">
-                      <dt className="text-slate-500">Intercepts counted</dt>
-                      <dd className="text-slate-300">{result.totalIntercepts}</dd>
-                    </div>
+                    {result.orientation === 'both' ? (
+                      <>
+                        <div className="flex justify-between border-t border-slate-800 pt-3 text-sm">
+                          <dt className="text-slate-500">Intercepts (horizontal)</dt>
+                          <dd className="text-slate-300">{result.directions.horizontal.intercepts}</dd>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <dt className="text-slate-500">Intercepts (vertical)</dt>
+                          <dd className="text-slate-300">{result.directions.vertical.intercepts}</dd>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <dt className="text-slate-500">Intercepts (total)</dt>
+                          <dd className="text-slate-300">{result.totalIntercepts}</dd>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="flex justify-between border-t border-slate-800 pt-3 text-sm">
+                        <dt className="text-slate-500">Intercepts counted</dt>
+                        <dd className="text-slate-300">{result.totalIntercepts}</dd>
+                      </div>
+                    )}
                     <div className="flex justify-between text-sm">
                       <dt className="text-slate-500">Total line length</dt>
                       <dd className="text-slate-300">
