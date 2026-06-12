@@ -533,14 +533,60 @@ function chamferDistance(interior, width, height) {
   return dist
 }
 
-// Markers = regional maxima of the distance transform: connected plateaus of
-// equal distance with no higher neighbour. Each corresponds to one grain
-// interior. minDist suppresses micro-maxima from noise (would oversegment).
-function findMarkers(dist, width, height, minDist) {
+// Connected-component labelling (BFS). 4-connectivity for interior regions
+// (diagonal contact across a boundary must not merge grains); 8-connectivity
+// for marker blobs.
+function labelComponents(mask, width, height, useDiagonals) {
   const labels = new Int32Array(width * height)
+  const stack = []
+  let count = 0
+
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || labels[start]) continue
+    count++
+    labels[start] = count
+    stack.length = 0
+    stack.push(start)
+
+    while (stack.length > 0) {
+      const j = stack.pop()
+      const jx = j % width
+      const jy = (j - jx) / width
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue
+          if (!useDiagonals && dx !== 0 && dy !== 0) continue
+          const nx = jx + dx
+          const ny = jy + dy
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+          const n = ny * width + nx
+          if (mask[n] && !labels[n]) {
+            labels[n] = count
+            stack.push(n)
+          }
+        }
+      }
+    }
+  }
+  return { labels, count }
+}
+
+// Markers from two complementary rules:
+//  1. Regional maxima of the distance transform (plateaus with no higher
+//     neighbour). Crucially these split regions that are MERGED by boundary
+//     gaps: each true grain inside a merged region keeps its own local
+//     maximum, and the watershed restores the missing boundary at the saddle
+//     between them.
+//  2. Per-component guarantee: any interior component large enough to be a
+//     grain (max distance >= minDist) that ended up without a regional-max
+//     marker gets its maximum-distance pixels as a marker, so no grain
+//     interior is ever left unseeded.
+function findMarkers(interior, dist, width, height, minDist) {
+  const { labels: comp, count: compCount } = labelComponents(interior, width, height, false)
+  const markerPixels = new Uint8Array(width * height)
+  const hasMarker = new Uint8Array(compCount + 1)
   const visited = new Uint8Array(width * height)
   const queue = []
-  let count = 0
 
   for (let start = 0; start < dist.length; start++) {
     if (visited[start] || dist[start] < minDist) continue
@@ -574,11 +620,24 @@ function findMarkers(dist, width, height, minDist) {
     }
 
     if (isMax) {
-      count++
-      for (const p of plateau) labels[p] = count
+      for (const p of plateau) markerPixels[p] = 1
+      hasMarker[comp[start]] = 1
     }
   }
-  return { labels, count }
+
+  const compMax = new Int32Array(compCount + 1)
+  for (let i = 0; i < comp.length; i++) {
+    const c = comp[i]
+    if (c && dist[i] > compMax[c]) compMax[c] = dist[i]
+  }
+  for (let i = 0; i < comp.length; i++) {
+    const c = comp[i]
+    if (!c || hasMarker[c]) continue
+    if (compMax[c] >= minDist && dist[i] === compMax[c]) markerPixels[i] = 1
+  }
+
+  const blobs = labelComponents(markerPixels, width, height, true)
+  return { ...blobs, components: compCount }
 }
 
 // Meyer's priority-flood watershed with a bucket queue. Floods all markers
@@ -652,7 +711,7 @@ export function watershedBoundaries(gray, width, height, sensitivity = 0) {
   // Sensitivity (-40..+40): stronger CLAHE, a threshold shifted to classify
   // more pixels as boundary, and a lower marker floor (more grains resolved).
   const claheClip = clamp(2.5 + sensitivity * 0.03, 1.5, 4)
-  const minMarkerPx = clamp(3.5 - sensitivity * 0.05, 1.5, 6)
+  const minMarkerPx = clamp(2 - sensitivity * 0.03, 1, 4)
 
   const enhanced = clahe(gray, width, height, claheClip)
   const blurred = gaussianBlur(enhanced, width, height)
@@ -686,14 +745,20 @@ export function watershedBoundaries(gray, width, height, sensitivity = 0) {
   }
   const useOtsu = otsuClassCount / smooth.length < 0.4
 
-  const interior = new Uint8Array(width * height)
-  for (let i = 0; i < interior.length; i++) {
+  const boundaryClass = new Uint8Array(width * height)
+  for (let i = 0; i < boundaryClass.length; i++) {
     const hatHit = boundaryIsDark
       ? closing[i] - smooth[i] > hatCut
       : smooth[i] - opening[i] > hatCut
     const otsuHit = useOtsu && (boundaryIsDark ? smooth[i] < threshold : smooth[i] > threshold)
-    interior[i] = hatHit || otsuHit ? 0 : 1
+    boundaryClass[i] = hatHit || otsuHit ? 1 : 0
   }
+
+  // Seal small gaps in the boundary network (binary closing) so the flood
+  // cannot leak between grains through broken boundary segments.
+  const sealed = morphologicalClose(boundaryClass, width, height)
+  const interior = new Uint8Array(width * height)
+  for (let i = 0; i < interior.length; i++) interior[i] = sealed[i] ? 0 : 1
 
   const dist = chamferDistance(interior, width, height)
   let maxDist = 0
@@ -708,7 +773,13 @@ export function watershedBoundaries(gray, width, height, sensitivity = 0) {
   })
   if (maxDist === 0) return empty()
 
-  const { labels, count } = findMarkers(dist, width, height, Math.round(minMarkerPx * 3))
+  const { labels, count, components } = findMarkers(
+    interior,
+    dist,
+    width,
+    height,
+    Math.round(minMarkerPx * 3),
+  )
   if (count === 0) return empty()
 
   // Flood grain centres (high distance) first; boundary-class pixels last.
@@ -783,7 +854,7 @@ export function watershedBoundaries(gray, width, height, sensitivity = 0) {
     if (!changed) break
   }
 
-  return { mask, grains: count, threshold: Math.round(threshold), polarity }
+  return { mask, grains: count, components, threshold: Math.round(threshold), polarity }
 }
 
 // ---------------------------------------------------------------------------
@@ -849,7 +920,12 @@ export function analyzeImage(
   } else {
     const ws = watershedBoundaries(gray, width, height, sensitivity)
     mask = ws.mask
-    detail = { grains: ws.grains, threshold: ws.threshold, polarity: ws.polarity }
+    detail = {
+      grains: ws.grains,
+      components: ws.components,
+      threshold: ws.threshold,
+      polarity: ws.polarity,
+    }
   }
 
   const marginX = Math.round(width * 0.05)
