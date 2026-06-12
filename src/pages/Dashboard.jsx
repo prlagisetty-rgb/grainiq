@@ -44,7 +44,7 @@ export default function Dashboard() {
   const [loadError, setLoadError] = useState(null)
   const [dragActive, setDragActive] = useState(false)
 
-  const [method, setMethod] = useState('canny')
+  const [method, setMethod] = useState('watershed')
   const [orientation, setOrientation] = useState('both')
   const [magnification, setMagnification] = useState(100)
   const [scaleOverride, setScaleOverride] = useState(null)
@@ -551,13 +551,15 @@ export default function Dashboard() {
                   onChange={(e) => setMethod(e.target.value)}
                   className={inputClasses}
                 >
-                  <option value="canny">Edge detection (Canny) — recommended</option>
+                  <option value="watershed">Watershed segmentation — recommended</option>
+                  <option value="canny">Edge detection (Canny)</option>
                   <option value="threshold">Dark threshold (legacy)</option>
                 </select>
                 <p className="mt-2 text-xs text-slate-500">
-                  Edge detection finds boundaries by contrast change, so it works whether
-                  boundaries etch dark or bright (e.g. Barker&apos;s etched aluminium). Dark
-                  threshold only suits dark-etched boundaries.
+                  Watershed floods each grain from its centre and finds the complete boundary
+                  network, including low-contrast boundaries that edge detection misses. Polarity
+                  is auto-detected, so dark-etched and bright boundaries (e.g. Barker&apos;s etched
+                  aluminium) both work.
                 </p>
 
                 <label htmlFor="orientation" className="mt-4 block text-sm font-medium text-slate-300">
@@ -660,7 +662,18 @@ export default function Dashboard() {
                         {((result.totalLengthPx * micronsPerAnalysisPx) / 1000).toFixed(2)} mm
                       </dd>
                     </div>
-                    {result.detail.threshold !== undefined ? (
+                    {result.detail.grains !== undefined ? (
+                      <>
+                        <div className="flex justify-between text-sm">
+                          <dt className="text-slate-500">Grains segmented</dt>
+                          <dd className="text-slate-300">{result.detail.grains}</dd>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <dt className="text-slate-500">Threshold ({result.detail.polarity} boundaries)</dt>
+                          <dd className="text-slate-300">{result.detail.threshold}</dd>
+                        </div>
+                      </>
+                    ) : result.detail.threshold !== undefined ? (
                       <div className="flex justify-between text-sm">
                         <dt className="text-slate-500">Threshold used</dt>
                         <dd className="text-slate-300">{result.detail.threshold}</dd>

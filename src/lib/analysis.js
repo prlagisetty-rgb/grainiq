@@ -1,13 +1,16 @@
 // Mean Linear Intercept (MLI) grain size analysis — ASTM E112 Heyn lineal intercept method.
 //
-// Two boundary detection methods:
-//  - 'canny' (default): CLAHE contrast enhancement → Gaussian blur → Sobel gradients →
-//    non-maximum suppression → adaptive (per-tile) hysteresis thresholding →
-//    morphological closing. Detects boundaries by local contrast change in either
-//    direction, so it handles dark-etched boundaries and bright boundaries (e.g.
-//    Barker's etched aluminium alloys) alike. CLAHE lifts faint boundaries before
-//    detection, per-tile thresholds keep low-contrast regions detectable, and closing
-//    bridges small gaps in boundary lines that would otherwise drop intercepts.
+// Three boundary detection methods:
+//  - 'watershed' (default): CLAHE → Gaussian blur → Otsu split into grain interior vs
+//    boundary class (polarity auto-detected, so dark-etched and bright boundaries both
+//    work) → chamfer distance transform → regional-maxima markers (one per grain
+//    interior) → Meyer priority-flood watershed. Floods every grain outward from its
+//    centre until floods collide, so it recovers the COMPLETE boundary network — a
+//    boundary between two grains is found even where its local contrast is too weak
+//    for an edge detector.
+//  - 'canny': CLAHE → Gaussian blur → Sobel gradients → non-maximum suppression →
+//    adaptive (per-tile) hysteresis thresholding → morphological closing. Finds
+//    boundaries by contrast change; can miss low-gradient boundary segments.
 //  - 'threshold': global Otsu dark-pixel threshold (the original prototype method).
 //    Only valid where boundaries etch darker than the grains.
 
@@ -460,6 +463,330 @@ export function cannyEdges(gray, width, height, sensitivity = 0) {
 }
 
 // ---------------------------------------------------------------------------
+// Watershed pipeline
+// ---------------------------------------------------------------------------
+
+// Separable 5x5 grayscale dilation (isMax) or erosion (!isMax), edge-clamped.
+function grayMorph5(src, width, height, isMax) {
+  const tmp = new Uint8Array(width * height)
+  const out = new Uint8Array(width * height)
+  const better = isMax ? (a, b) => (b > a ? b : a) : (a, b) => (b < a ? b : a)
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width
+    for (let x = 0; x < width; x++) {
+      let v = src[row + x]
+      for (let k = -2; k <= 2; k++) {
+        let xx = x + k
+        if (xx < 0) xx = 0
+        else if (xx >= width) xx = width - 1
+        v = better(v, src[row + xx])
+      }
+      tmp[row + x] = v
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let v = tmp[y * width + x]
+      for (let k = -2; k <= 2; k++) {
+        let yy = y + k
+        if (yy < 0) yy = 0
+        else if (yy >= height) yy = height - 1
+        v = better(v, tmp[yy * width + x])
+      }
+      out[y * width + x] = v
+    }
+  }
+  return out
+}
+
+// Two-pass chamfer (3,4) distance transform: distance from each interior pixel
+// to the nearest boundary-class pixel, in units of ~1/3 px. Out-of-image
+// counts as boundary so border grains get sensible centres.
+function chamferDistance(interior, width, height) {
+  const INF = 1 << 29
+  const dist = new Int32Array(width * height)
+  for (let i = 0; i < dist.length; i++) dist[i] = interior[i] ? INF : 0
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x
+      if (dist[i] === 0) continue
+      const left = x > 0 ? dist[i - 1] : 0
+      const up = y > 0 ? dist[i - width] : 0
+      const upLeft = x > 0 && y > 0 ? dist[i - width - 1] : 0
+      const upRight = x < width - 1 && y > 0 ? dist[i - width + 1] : 0
+      dist[i] = Math.min(dist[i], left + 3, up + 3, upLeft + 4, upRight + 4)
+    }
+  }
+  for (let y = height - 1; y >= 0; y--) {
+    for (let x = width - 1; x >= 0; x--) {
+      const i = y * width + x
+      if (dist[i] === 0) continue
+      const right = x < width - 1 ? dist[i + 1] : 0
+      const down = y < height - 1 ? dist[i + width] : 0
+      const downRight = x < width - 1 && y < height - 1 ? dist[i + width + 1] : 0
+      const downLeft = x > 0 && y < height - 1 ? dist[i + width - 1] : 0
+      dist[i] = Math.min(dist[i], right + 3, down + 3, downRight + 4, downLeft + 4)
+    }
+  }
+  return dist
+}
+
+// Markers = regional maxima of the distance transform: connected plateaus of
+// equal distance with no higher neighbour. Each corresponds to one grain
+// interior. minDist suppresses micro-maxima from noise (would oversegment).
+function findMarkers(dist, width, height, minDist) {
+  const labels = new Int32Array(width * height)
+  const visited = new Uint8Array(width * height)
+  const queue = []
+  let count = 0
+
+  for (let start = 0; start < dist.length; start++) {
+    if (visited[start] || dist[start] < minDist) continue
+
+    const value = dist[start]
+    const plateau = [start]
+    visited[start] = 1
+    queue.length = 0
+    queue.push(start)
+    let isMax = true
+
+    while (queue.length > 0) {
+      const j = queue.pop()
+      const jx = j % width
+      const jy = (j - jx) / width
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue
+          const nx = jx + dx
+          const ny = jy + dy
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+          const n = ny * width + nx
+          if (dist[n] > value) isMax = false
+          else if (dist[n] === value && !visited[n]) {
+            visited[n] = 1
+            plateau.push(n)
+            queue.push(n)
+          }
+        }
+      }
+    }
+
+    if (isMax) {
+      count++
+      for (const p of plateau) labels[p] = count
+    }
+  }
+  return { labels, count }
+}
+
+// Meyer's priority-flood watershed with a bucket queue. Floods all markers
+// outward in elevation order (4-connected); pixels where two different floods
+// meet become watershed lines (-1) — the grain boundary network.
+function watershedFlood(elevation, markers, width, height, maxElevation) {
+  const WSHED = -1
+  const out = Int32Array.from(markers)
+  const inQueue = new Uint8Array(width * height)
+  const buckets = []
+  for (let e = 0; e <= maxElevation; e++) buckets.push([])
+
+  const pushNeighbours = (i, level) => {
+    const x = i % width
+    const y = (i - x) / width
+    const neighbours = [
+      x > 0 ? i - 1 : -1,
+      x < width - 1 ? i + 1 : -1,
+      y > 0 ? i - width : -1,
+      y < height - 1 ? i + width : -1,
+    ]
+    for (const n of neighbours) {
+      if (n >= 0 && out[n] === 0 && !inQueue[n]) {
+        inQueue[n] = 1
+        buckets[Math.max(elevation[n], level)].push(n)
+      }
+    }
+  }
+
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] > 0) pushNeighbours(i, elevation[i])
+  }
+
+  for (let level = 0; level <= maxElevation; level++) {
+    const bucket = buckets[level]
+    while (bucket.length > 0) {
+      const i = bucket.pop()
+      if (out[i] !== 0) continue
+
+      const x = i % width
+      const y = (i - x) / width
+      let label = 0
+      let isWatershed = false
+      const neighbours = [
+        x > 0 ? i - 1 : -1,
+        x < width - 1 ? i + 1 : -1,
+        y > 0 ? i - width : -1,
+        y < height - 1 ? i + width : -1,
+      ]
+      for (const n of neighbours) {
+        if (n < 0) continue
+        const l = out[n]
+        if (l > 0) {
+          if (label === 0) label = l
+          else if (label !== l) isWatershed = true
+        }
+      }
+
+      if (isWatershed || label === 0) {
+        out[i] = WSHED
+        continue
+      }
+      out[i] = label
+      pushNeighbours(i, level)
+    }
+  }
+  return out
+}
+
+export function watershedBoundaries(gray, width, height, sensitivity = 0) {
+  // Sensitivity (-40..+40): stronger CLAHE, a threshold shifted to classify
+  // more pixels as boundary, and a lower marker floor (more grains resolved).
+  const claheClip = clamp(2.5 + sensitivity * 0.03, 1.5, 4)
+  const minMarkerPx = clamp(3.5 - sensitivity * 0.05, 1.5, 6)
+
+  const enhanced = clahe(gray, width, height, claheClip)
+  const blurred = gaussianBlur(enhanced, width, height)
+  const smooth = new Uint8ClampedArray(width * height)
+  for (let i = 0; i < smooth.length; i++) smooth[i] = blurred[i]
+
+  // Boundary class by local depth, not absolute level: bottom-hat
+  // (closing − image) lights up thin DARK valleys by how far they dip below
+  // their surroundings; top-hat (image − opening) does the same for thin
+  // BRIGHT ridges. This catches faint boundaries that a global Otsu threshold
+  // classifies as grain interior. Polarity = whichever hat carries more mass.
+  const hatCut = clamp(10 - sensitivity * 0.15, 3, 20)
+  const closing = grayMorph5(grayMorph5(smooth, width, height, true), width, height, false)
+  const opening = grayMorph5(grayMorph5(smooth, width, height, false), width, height, true)
+  let darkMass = 0
+  let brightMass = 0
+  for (let i = 0; i < smooth.length; i++) {
+    if (closing[i] - smooth[i] > hatCut) darkMass++
+    if (smooth[i] - opening[i] > hatCut) brightMass++
+  }
+  const boundaryIsDark = darkMass >= brightMass
+
+  // The 5x5 hat can't fill boundary bands wider than ~4px, so back it up with
+  // the global Otsu class — but only when that class is a clear minority
+  // (a genuine thin network rather than half the histogram).
+  const otsu = otsuThreshold(smooth)
+  const threshold = clamp(otsu + (boundaryIsDark ? 1 : -1) * sensitivity * 0.5, 1, 254)
+  let otsuClassCount = 0
+  for (let i = 0; i < smooth.length; i++) {
+    if (boundaryIsDark ? smooth[i] < threshold : smooth[i] > threshold) otsuClassCount++
+  }
+  const useOtsu = otsuClassCount / smooth.length < 0.4
+
+  const interior = new Uint8Array(width * height)
+  for (let i = 0; i < interior.length; i++) {
+    const hatHit = boundaryIsDark
+      ? closing[i] - smooth[i] > hatCut
+      : smooth[i] - opening[i] > hatCut
+    const otsuHit = useOtsu && (boundaryIsDark ? smooth[i] < threshold : smooth[i] > threshold)
+    interior[i] = hatHit || otsuHit ? 0 : 1
+  }
+
+  const dist = chamferDistance(interior, width, height)
+  let maxDist = 0
+  for (let i = 0; i < dist.length; i++) if (dist[i] > maxDist) maxDist = dist[i]
+
+  const polarity = boundaryIsDark ? 'dark' : 'bright'
+  const empty = () => ({
+    mask: new Uint8Array(width * height),
+    grains: 0,
+    threshold: Math.round(threshold),
+    polarity,
+  })
+  if (maxDist === 0) return empty()
+
+  const { labels, count } = findMarkers(dist, width, height, Math.round(minMarkerPx * 3))
+  if (count === 0) return empty()
+
+  // Flood grain centres (high distance) first; boundary-class pixels last.
+  const maxElevation = maxDist + 1
+  const elevation = new Int32Array(width * height)
+  for (let i = 0; i < elevation.length; i++) {
+    elevation[i] = interior[i] ? maxDist - dist[i] : maxElevation
+  }
+
+  const segmented = watershedFlood(elevation, labels, width, height, maxElevation)
+
+  // Boundary mask = watershed pixels PLUS label transitions. Meyer's flood can
+  // leave two regions directly adjacent with no watershed pixel between them
+  // (zero-width line); marking one side of every label change closes the gap.
+  const mask = new Uint8Array(width * height)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x
+      const label = segmented[i]
+      if (label === -1) {
+        mask[i] = 1
+        continue
+      }
+      if (label > 0) {
+        const right = x < width - 1 ? segmented[i + 1] : label
+        const down = y < height - 1 ? segmented[i + width] : label
+        // Mark both sides so a test line lying inside a claimed boundary band
+        // still meets the mask.
+        if (right > 0 && right !== label) {
+          mask[i] = 1
+          mask[i + 1] = 1
+        }
+        if (down > 0 && down !== label) {
+          mask[i] = 1
+          mask[i + width] = 1
+        }
+      }
+    }
+  }
+
+  // Extend the mask through thick boundary bands: watershed lines form at the
+  // band edges, leaving the band interior label-claimed — but a boundary-class
+  // pixel touching a marked pixel is part of the same physical boundary.
+  // Bands are at most ~5px wide (the hat structuring element), so 3 dilation
+  // passes restricted to boundary-class pixels reach closure.
+  for (let pass = 0; pass < 3; pass++) {
+    let changed = false
+    const snapshot = Uint8Array.from(mask)
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x
+        if (snapshot[i] || interior[i]) continue
+        let touchesMask = false
+        for (let dy = -1; dy <= 1 && !touchesMask; dy++) {
+          const ny = y + dy
+          if (ny < 0 || ny >= height) continue
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx
+            if (nx < 0 || nx >= width) continue
+            if (snapshot[ny * width + nx]) {
+              touchesMask = true
+              break
+            }
+          }
+        }
+        if (touchesMask) {
+          mask[i] = 1
+          changed = true
+        }
+      }
+    }
+    if (!changed) break
+  }
+
+  return { mask, grains: count, threshold: Math.round(threshold), polarity }
+}
+
+// ---------------------------------------------------------------------------
 // MLI analysis
 // ---------------------------------------------------------------------------
 
@@ -503,7 +830,7 @@ function walkLine(mask, getIndex, from, to, minSpacing) {
  */
 export function analyzeImage(
   imageData,
-  { numLines = 7, sensitivity = 0, minSpacing = 8, method = 'canny', orientation = 'both' } = {},
+  { numLines = 7, sensitivity = 0, minSpacing = 8, method = 'watershed', orientation = 'both' } = {},
 ) {
   const { width, height } = imageData
   const gray = toGrayscale(imageData)
@@ -515,10 +842,14 @@ export function analyzeImage(
     mask = new Uint8Array(width * height)
     for (let i = 0; i < mask.length; i++) mask[i] = gray[i] < threshold ? 1 : 0
     detail = { threshold }
-  } else {
+  } else if (method === 'canny') {
     const { edges, high, low } = cannyEdges(gray, width, height, sensitivity)
     mask = edges
     detail = { highThreshold: Math.round(high), lowThreshold: Math.round(low) }
+  } else {
+    const ws = watershedBoundaries(gray, width, height, sensitivity)
+    mask = ws.mask
+    detail = { grains: ws.grains, threshold: ws.threshold, polarity: ws.polarity }
   }
 
   const marginX = Math.round(width * 0.05)
