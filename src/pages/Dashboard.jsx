@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
+import { useProfile } from '../hooks/useProfile'
 import { analyzeImage, astmGrainNumber } from '../lib/analysis'
+import { startCheckout, openBillingPortal } from '../lib/billing'
 
 // Canny runs on every slider tick, so cap the analysis resolution to keep it
 // interactive. sampleScale corrects the µm conversion for the downscale.
@@ -19,9 +21,24 @@ function lineLength(line) {
 
 export default function Dashboard() {
   const { user, signOut } = useAuth()
+  const {
+    isPro,
+    usage,
+    remaining,
+    limit,
+    loading: profileLoading,
+    refresh,
+    recordAnalysis,
+  } = useProfile()
   const canvasRef = useRef(null)
   const fileInputRef = useRef(null)
   const draggingRef = useRef(false)
+  const recordedRef = useRef(null)
+
+  const [showUpgrade, setShowUpgrade] = useState(false)
+  const [billingBusy, setBillingBusy] = useState(false)
+  const [billingError, setBillingError] = useState(null)
+  const [checkoutPending, setCheckoutPending] = useState(false)
 
   const [source, setSource] = useState(null) // { canvas, imageData, sampleScale, fileName, width, height }
   const [loadError, setLoadError] = useState(null)
@@ -46,6 +63,10 @@ export default function Dashboard() {
   async function loadFile(file) {
     setLoadError(null)
     if (!file) return
+    if (!profileLoading && !isPro && remaining <= 0) {
+      setShowUpgrade(true)
+      return
+    }
     if (!file.type.startsWith('image/')) {
       setLoadError('That file is not an image. Use PNG, JPEG, BMP or WebP (export TIFFs to PNG first).')
       return
@@ -95,6 +116,58 @@ export default function Dashboard() {
   const micronsPerAnalysisPx = source ? scale * source.sampleScale : null
   const mliMicrons = result?.mliPx ? result.mliPx * micronsPerAnalysisPx : null
   const grainNumber = astmGrainNumber(mliMicrons)
+
+  // One analysis = one image loaded; parameter tweaks on the same image are
+  // free. Record on the first computed result for each new source.
+  useEffect(() => {
+    if (!source || !result || recordedRef.current === source) return
+    recordedRef.current = source
+    recordAnalysis({ mliMicrons, astmG: grainNumber }).then((ok) => {
+      if (!ok) setShowUpgrade(true)
+    })
+  }, [source, result, mliMicrons, grainNumber, recordAnalysis])
+
+  // Returning from Stripe Checkout: poll until the webhook flips the tier.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('checkout') !== 'success') return
+    window.history.replaceState({}, '', window.location.pathname)
+    setCheckoutPending(true)
+    let attempts = 0
+    const timer = setInterval(async () => {
+      attempts += 1
+      const tier = await refresh()
+      if (tier === 'pro' || attempts >= 15) {
+        clearInterval(timer)
+        setCheckoutPending(false)
+      }
+    }, 2000)
+    return () => clearInterval(timer)
+  }, [refresh])
+
+  async function handleUpgrade() {
+    setBillingBusy(true)
+    setBillingError(null)
+    try {
+      await startCheckout()
+    } catch (err) {
+      setBillingError(err.message)
+      setBillingBusy(false)
+    }
+  }
+
+  async function handleBillingPortal() {
+    setBillingBusy(true)
+    setBillingError(null)
+    try {
+      await openBillingPortal()
+    } catch (err) {
+      setBillingError(err.message)
+      setBillingBusy(false)
+    }
+  }
+
+  const blocked = !profileLoading && !isPro && remaining <= 0
 
   useEffect(() => {
     if (!source || !result) return
@@ -232,16 +305,72 @@ export default function Dashboard() {
             Grain<span className="text-teal-400">IQ</span>
           </h1>
           <div className="flex items-center gap-4">
+            {checkoutPending ? (
+              <span className="text-sm text-teal-400">Finalising upgrade…</span>
+            ) : (
+              !profileLoading &&
+              (isPro ? (
+                <>
+                  <span className="rounded-full bg-teal-500/15 px-2.5 py-0.5 text-xs font-semibold text-teal-400">
+                    Pro
+                  </span>
+                  <button
+                    onClick={handleBillingPortal}
+                    disabled={billingBusy}
+                    className="text-sm text-slate-400 hover:text-slate-300 disabled:opacity-60"
+                  >
+                    Manage billing
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className={`text-sm ${remaining <= 3 ? 'text-amber-400' : 'text-slate-400'}`}>
+                    {usage ?? 0}/{limit} analyses this month
+                  </span>
+                  <button
+                    onClick={handleUpgrade}
+                    disabled={billingBusy}
+                    className="rounded-md bg-teal-500 px-3 py-1.5 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-60"
+                  >
+                    Upgrade to Pro
+                  </button>
+                </>
+              ))
+            )}
             <span className="text-sm text-slate-400">{user?.email}</span>
             <button onClick={signOut} className={secondaryButtonClasses}>
               Sign out
             </button>
           </div>
         </div>
+        {billingError && (
+          <div className="border-t border-red-900 bg-red-950/60 px-4 py-2 text-center text-sm text-red-400">
+            {billingError}
+          </div>
+        )}
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-8">
-        {!source ? (
+        {!source && blocked ? (
+          <div className="mx-auto max-w-2xl rounded-xl border border-teal-500/30 bg-slate-900 px-8 py-16 text-center">
+            <h2 className="text-lg font-semibold text-white">
+              You&apos;ve used all {limit} free analyses this month
+            </h2>
+            <p className="mt-2 text-sm text-slate-400">
+              Upgrade to Pro for unlimited analyses — £89/month, cancel anytime.
+            </p>
+            <button
+              onClick={handleUpgrade}
+              disabled={billingBusy}
+              className="mt-6 rounded-md bg-teal-500 px-6 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-60"
+            >
+              {billingBusy ? 'Opening checkout…' : 'Upgrade to Pro'}
+            </button>
+            <p className="mt-4 text-xs text-slate-500">
+              Your free allowance resets on the 1st of each month.
+            </p>
+          </div>
+        ) : !source ? (
           <div
             onDragOver={(e) => {
               e.preventDefault()
@@ -613,6 +742,33 @@ export default function Dashboard() {
           }}
         />
       </main>
+
+      {showUpgrade && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-8 text-center">
+            <h2 className="text-lg font-semibold text-white">Free limit reached</h2>
+            <p className="mt-2 text-sm text-slate-400">
+              You&apos;ve used all {limit} free analyses this month. Upgrade to Pro for unlimited
+              analyses — £89/month, cancel anytime.
+            </p>
+            <div className="mt-6 flex gap-3">
+              <button
+                onClick={handleUpgrade}
+                disabled={billingBusy}
+                className="flex-1 rounded-md bg-teal-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-60"
+              >
+                {billingBusy ? 'Opening checkout…' : 'Upgrade to Pro'}
+              </button>
+              <button
+                onClick={() => setShowUpgrade(false)}
+                className={`flex-1 ${secondaryButtonClasses}`}
+              >
+                Not now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
