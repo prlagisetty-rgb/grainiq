@@ -861,24 +861,50 @@ export function watershedBoundaries(gray, width, height, sensitivity = 0) {
 // MLI analysis
 // ---------------------------------------------------------------------------
 
-// Walk one test line through the boundary mask. getIndex maps the moving
-// coordinate to a mask index; a transition into a boundary pixel counts as one
-// intercept, with minSpacing suppressing double counts from noise or thick
-// boundaries.
-function walkLine(mask, getIndex, from, to, minSpacing) {
+// Strip connected components smaller than minSize pixels (8-connectivity).
+// Orphan 1–2px speckles in a thresholded or edge map sit directly on a test
+// line and get miscounted as intercepts (false positives); a real grain
+// boundary is a large connected structure, so clearing the specks removes that
+// error class without dropping any true crossing. Returns a fresh mask.
+function removeSmallComponents(mask, width, height, minSize) {
+  const { labels, count } = labelComponents(mask, width, height, true)
+  if (count === 0) return mask
+  const sizes = new Int32Array(count + 1)
+  for (let i = 0; i < labels.length; i++) {
+    if (labels[i]) sizes[labels[i]]++
+  }
+  const out = new Uint8Array(mask.length)
+  for (let i = 0; i < mask.length; i++) {
+    if (mask[i] && sizes[labels[i]] >= minSize) out[i] = 1
+  }
+  return out
+}
+
+// Intercept detection samples a band this many pixels either side of the test
+// line (perpendicular to its direction) instead of only the line itself, so a
+// single-pixel gap in a THIN line map (threshold, canny) exactly at a crossing
+// point still registers rather than dropping a real intercept (false negative).
+// Not used for watershed: its mask is already gap-sealed at every crossing, so a
+// band there only reaches sideways into the adjacent boundary and over-counts.
+const BAND_HALF = 3
+
+// Walk one test line, counting transitions into the boundary mask as intercepts.
+// `isBoundary(p)` is the band sampler for moving coordinate p; minSpacing
+// suppresses double counts from noise or thick boundaries.
+function walkLine(isBoundary, from, to, minSpacing) {
   const intercepts = []
   let inBoundary = false
   let lastIntercept = -Infinity
 
   for (let p = from; p < to; p++) {
-    const isBoundary = mask[getIndex(p)] === 1
-    if (isBoundary && !inBoundary) {
+    const boundary = isBoundary(p)
+    if (boundary && !inBoundary) {
       if (p - lastIntercept >= minSpacing) {
         intercepts.push(p)
         lastIntercept = p
       }
       inBoundary = true
-    } else if (!isBoundary) {
+    } else if (!boundary) {
       inBoundary = false
     }
   }
@@ -928,9 +954,19 @@ export function analyzeImage(
     }
   }
 
+  // Clean every method's mask before counting: drop orphan 1–2px speckles that
+  // would read as phantom intercepts. Harmless on the watershed/canny networks
+  // (large connected structures), decisive for the raw threshold map.
+  mask = removeSmallComponents(mask, width, height, 3)
+
   const marginX = Math.round(width * 0.05)
   const marginY = Math.round(height * 0.05)
   const linesPerDirection = orientation === 'both' ? Math.max(3, numLines) : numLines
+
+  // Widen intercept detection to a band only for the thin-line methods; the
+  // gap-sealed watershed mask is walked exactly on the line (bandHalf 0 reduces
+  // the band loop to a single on-line sample).
+  const bandHalf = method === 'watershed' ? 0 : BAND_HALF
 
   const lines = []
   const directions = {}
@@ -942,7 +978,19 @@ export function analyzeImage(
     let intercepts = 0
     for (let n = 0; n < linesPerDirection; n++) {
       const y = Math.round(marginY + ((n + 0.5) / linesPerDirection) * usable)
-      const hits = walkLine(mask, (x) => y * width + x, x1, x2, minSpacing)
+      // Band perpendicular to the line spans rows y-bandHalf..y+bandHalf.
+      const hits = walkLine(
+        (x) => {
+          for (let off = -bandHalf; off <= bandHalf; off++) {
+            const yy = y + off
+            if (yy >= 0 && yy < height && mask[yy * width + x] === 1) return true
+          }
+          return false
+        },
+        x1,
+        x2,
+        minSpacing,
+      )
       lines.push({ orientation: 'horizontal', y, x1, x2, intercepts: hits })
       intercepts += hits.length
     }
@@ -960,7 +1008,19 @@ export function analyzeImage(
     let intercepts = 0
     for (let n = 0; n < linesPerDirection; n++) {
       const x = Math.round(marginX + ((n + 0.5) / linesPerDirection) * usable)
-      const hits = walkLine(mask, (y) => y * width + x, y1, y2, minSpacing)
+      // Band perpendicular to the line spans columns x-bandHalf..x+bandHalf.
+      const hits = walkLine(
+        (y) => {
+          for (let off = -bandHalf; off <= bandHalf; off++) {
+            const xx = x + off
+            if (xx >= 0 && xx < width && mask[y * width + xx] === 1) return true
+          }
+          return false
+        },
+        y1,
+        y2,
+        minSpacing,
+      )
       lines.push({ orientation: 'vertical', x, y1, y2, intercepts: hits })
       intercepts += hits.length
     }
