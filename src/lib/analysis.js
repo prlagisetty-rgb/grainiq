@@ -425,10 +425,15 @@ function erode3(mask, width, height) {
   return out
 }
 
-// Closing (dilate → erode) bridges 1–2px gaps in detected boundary lines so a
-// test line crossing a slightly broken boundary still registers one intercept.
-function morphologicalClose(mask, width, height) {
-  return erode3(dilate3(mask, width, height), width, height)
+// Closing (dilate → erode) bridges gaps in detected boundary lines so a test
+// line crossing a slightly broken boundary still registers one intercept. With
+// radius r it runs r dilations then r erosions (≈ a (2r+1)×(2r+1) structuring
+// element), sealing gaps up to ~2r px while keeping line thickness ≈ original.
+function morphologicalClose(mask, width, height, radius = 1) {
+  let m = mask
+  for (let i = 0; i < radius; i++) m = dilate3(m, width, height)
+  for (let i = 0; i < radius; i++) m = erode3(m, width, height)
+  return m
 }
 
 // ---------------------------------------------------------------------------
@@ -436,12 +441,17 @@ function morphologicalClose(mask, width, height) {
 // ---------------------------------------------------------------------------
 
 export function cannyEdges(gray, width, height, sensitivity = 0) {
-  // The single sensitivity control (-40..+40) drives all three adaptive knobs.
+  // The single sensitivity control (-40..+40) drives all the adaptive knobs.
   // Higher sensitivity → stronger CLAHE, lower tile percentile, lower noise
-  // floor — each monotonically increases detected boundaries.
+  // floor — each monotonically increases detected boundaries. The defaults
+  // (sensitivity 0) are deliberately permissive: a lower high-threshold
+  // percentile, noise floor, and low ratio than a textbook Canny, because
+  // grain boundaries are often faint and missed segments hurt MLI more than a
+  // few extra edges do.
   const claheClip = clamp(2.5 + sensitivity * 0.03, 1.5, 4)
-  const fraction = clamp(0.88 - sensitivity * 0.005, 0.6, 0.99)
-  const noiseFloorRatio = clamp(0.25 - sensitivity * 0.003, 0.08, 0.5)
+  const fraction = clamp(0.78 - sensitivity * 0.005, 0.55, 0.97)
+  const noiseFloorRatio = clamp(0.18 - sensitivity * 0.003, 0.06, 0.45)
+  const lowRatio = 0.3
 
   const enhanced = clahe(gray, width, height, claheClip)
   const blurred = gaussianBlur(enhanced, width, height)
@@ -453,13 +463,15 @@ export function cannyEdges(gray, width, height, sensitivity = 0) {
     return { edges: new Uint8Array(width * height), high: 0, low: 0 }
   }
 
-  const raw = hysteresisAdaptive(thin, width, height, adaptive.map, 0.4)
-  const edges = morphologicalClose(raw, width, height)
+  const raw = hysteresisAdaptive(thin, width, height, adaptive.map, lowRatio)
+  // Stronger closing (radius 2) seals the wider gaps a lower threshold can leave
+  // between faint boundary segments, so they read as one continuous boundary.
+  const edges = morphologicalClose(raw, width, height, 2)
 
   // Report the median tile threshold as the representative value.
   const sorted = Array.from(adaptive.tileHigh).sort((a, b) => a - b)
   const high = sorted[Math.floor(sorted.length / 2)]
-  return { edges, high, low: high * 0.4 }
+  return { edges, high, low: high * lowRatio }
 }
 
 // ---------------------------------------------------------------------------
@@ -977,23 +989,28 @@ export function analyzeImage(
     }
   }
 
-  // Clean every method's mask before counting, sizing the cut to the boundaries
-  // actually detected: a component thinner than the mean boundary width can't be
-  // a real segment. Thin line maps (faint/broken threshold + canny) fall to the
-  // 2px floor — only true single-pixel orphans go — which recovers the real 2px
-  // fragments a fixed 3px cut was deleting; only genuinely thick (≥3px) masks
-  // keep the 3px cut. No-op on the gap-sealed watershed network either way.
-  const minComponent = clamp(Math.floor(averageBoundaryWidth(mask, width, height)), 2, 3)
-  mask = removeSmallComponents(mask, width, height, minComponent)
+  // Clean the canny/watershed masks before counting, sizing the cut to the
+  // boundaries actually detected: a component thinner than the mean boundary
+  // width can't be a real segment, so it falls to the 2–3px cut (no-op on the
+  // gap-sealed watershed network). The raw threshold map is left untouched and
+  // walked on-line — its pre-cleaning baseline — because on faint micrographs its
+  // real boundaries are sparse 1–2px specks that any component removal deletes
+  // (this was the 266→174 regression).
+  if (method !== 'threshold') {
+    const minComponent = clamp(Math.floor(averageBoundaryWidth(mask, width, height)), 2, 3)
+    mask = removeSmallComponents(mask, width, height, minComponent)
+  }
 
   const marginX = Math.round(width * 0.05)
   const marginY = Math.round(height * 0.05)
   const linesPerDirection = orientation === 'both' ? Math.max(3, numLines) : numLines
 
-  // Widen intercept detection to a band only for the thin-line methods; the
-  // gap-sealed watershed mask is walked exactly on the line (bandHalf 0 reduces
-  // the band loop to a single on-line sample).
-  const bandHalf = method === 'watershed' ? 0 : BAND_HALF
+  // Perpendicular intercept band: canny only. Watershed is gap-sealed, so a band
+  // over-counts into adjacent boundaries; the threshold method is held at its
+  // pre-cleaning baseline — walked exactly on-line with no speckle cut — so its
+  // count matches the trusted 266-intercept reference. bandHalf 0 reduces the
+  // band loop to a single on-line sample.
+  const bandHalf = method === 'canny' ? BAND_HALF : 0
 
   const lines = []
   const directions = {}
