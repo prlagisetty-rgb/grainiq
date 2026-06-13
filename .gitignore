@@ -8,3 +8,7 @@ npm-debug.log*
 .vercel
 .claude/settings.local.json
 supabase/.temp/
+
+# Project brain — sensitive business strategy, financials & named contacts.
+# Kept on local disk, never committed/pushed.
+CLAUDE.md
