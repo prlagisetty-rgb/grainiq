@@ -880,6 +880,29 @@ function removeSmallComponents(mask, width, height, minSize) {
   return out
 }
 
+// Mean boundary stroke width (px) of a mask, estimated as 2·area / perimeter,
+// where perimeter counts mask-pixel sides facing background or the image edge.
+// For a ribbon of width w and length L≫w this returns ≈ w (a 1px line → ~1, a
+// 3px band → ~3). Used to size speckle removal to the boundaries actually
+// detected, so thin 1–2px line maps aren't stripped of real fragments while
+// thick watershed bands can still shed larger noise blobs.
+function averageBoundaryWidth(mask, width, height) {
+  let area = 0
+  let perimeter = 0
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x
+      if (!mask[i]) continue
+      area++
+      if (x === 0 || !mask[i - 1]) perimeter++
+      if (x === width - 1 || !mask[i + 1]) perimeter++
+      if (y === 0 || !mask[i - width]) perimeter++
+      if (y === height - 1 || !mask[i + width]) perimeter++
+    }
+  }
+  return perimeter === 0 ? 0 : (2 * area) / perimeter
+}
+
 // Intercept detection samples a band this many pixels either side of the test
 // line (perpendicular to its direction) instead of only the line itself, so a
 // single-pixel gap in a THIN line map (threshold, canny) exactly at a crossing
@@ -954,10 +977,14 @@ export function analyzeImage(
     }
   }
 
-  // Clean every method's mask before counting: drop orphan 1–2px speckles that
-  // would read as phantom intercepts. Harmless on the watershed/canny networks
-  // (large connected structures), decisive for the raw threshold map.
-  mask = removeSmallComponents(mask, width, height, 3)
+  // Clean every method's mask before counting, sizing the cut to the boundaries
+  // actually detected: a component thinner than the mean boundary width can't be
+  // a real segment. Thin line maps (faint/broken threshold + canny) fall to the
+  // 2px floor — only true single-pixel orphans go — which recovers the real 2px
+  // fragments a fixed 3px cut was deleting; only genuinely thick (≥3px) masks
+  // keep the 3px cut. No-op on the gap-sealed watershed network either way.
+  const minComponent = clamp(Math.floor(averageBoundaryWidth(mask, width, height)), 2, 3)
+  mask = removeSmallComponents(mask, width, height, minComponent)
 
   const marginX = Math.round(width * 0.05)
   const marginY = Math.round(height * 0.05)
