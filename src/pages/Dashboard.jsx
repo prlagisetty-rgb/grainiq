@@ -39,6 +39,8 @@ export default function Dashboard() {
   const [billingBusy, setBillingBusy] = useState(false)
   const [billingError, setBillingError] = useState(null)
   const [checkoutPending, setCheckoutPending] = useState(false)
+  const [exportError, setExportError] = useState(null)
+  const [exporting, setExporting] = useState(false)
 
   const [source, setSource] = useState(null) // { canvas, imageData, sampleScale, fileName, width, height }
   const [loadError, setLoadError] = useState(null)
@@ -295,6 +297,44 @@ export default function Dashboard() {
     setScaleOverride(null)
     setCalibrated(null)
     setCalibration({ mode: 'idle', line: null, realMicrons: '' })
+  }
+
+  async function handleExport() {
+    setExportError(null)
+    const canvas = canvasRef.current
+    if (!canvas || !result || mliMicrons == null) return
+    setExporting(true)
+    try {
+      // Lazy-load so jsPDF (~150 kB) stays out of the initial bundle.
+      const { downloadReportPdf } = await import('../lib/report')
+      downloadReportPdf({
+        fileName: source.fileName,
+        imageDataUrl: canvas.toDataURL('image/png'),
+        imageWidth: source.width,
+        imageHeight: source.height,
+        method: result.method,
+        orientation: result.orientation,
+        numLines,
+        sensitivity,
+        mliMicrons,
+        grainNumber,
+        totalIntercepts: result.totalIntercepts,
+        directions: result.directions,
+        totalLengthMm: (result.totalLengthPx * micronsPerAnalysisPx) / 1000,
+        detail: result.detail,
+        scale,
+        scaleSource: calibrated ? 'Scale bar calibration' : 'Magnification estimate',
+        calibrated,
+        magnification,
+        isPro,
+        analyst: user?.email ?? '',
+      })
+    } catch (err) {
+      console.error(err)
+      setExportError('Could not generate the PDF. Please try again.')
+    } finally {
+      setExporting(false)
+    }
   }
 
   return (
@@ -696,6 +736,29 @@ export default function Dashboard() {
                 ) : (
                   <p className="mt-3 text-sm text-amber-400">
                     No grain boundaries detected — try raising the detection sensitivity.
+                  </p>
+                )}
+                <button
+                  onClick={handleExport}
+                  disabled={mliMicrons == null || exporting}
+                  className="mt-4 w-full rounded-md bg-teal-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {exporting ? 'Generating…' : 'Export report (PDF)'}
+                </button>
+                {!isPro && mliMicrons != null && (
+                  <p className="mt-1.5 text-center text-xs text-slate-500">
+                    Free reports include a watermark.{' '}
+                    <button
+                      onClick={handleUpgrade}
+                      className="font-medium text-teal-400 underline hover:text-teal-300"
+                    >
+                      Upgrade
+                    </button>
+                  </p>
+                )}
+                {exportError && (
+                  <p role="alert" className="mt-2 rounded-md bg-red-950/60 px-3 py-2 text-xs text-red-400">
+                    {exportError}
                   </p>
                 )}
                 <p className="mt-4 border-t border-slate-800 pt-3 text-xs leading-relaxed text-slate-500">
