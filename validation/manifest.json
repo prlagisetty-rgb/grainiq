@@ -1,0 +1,15 @@
+{
+  "_comment": "Ground-truth cases for the detection-accuracy harness. See README.md. JSON has no comments, so this _comment key and the _example below are ignored by the scorer (it only reads the cases array). Copy _example into cases and fill it in for each real micrograph.",
+  "_example": {
+    "id": "sample-001-low-carbon-steel",
+    "image": "fixtures/sample-001.png",
+    "description": "Low-carbon steel, 2% nital etch, 500x",
+    "params": { "method": "threshold", "orientation": "both", "numLines": 7, "sensitivity": 0 },
+    "manualPerLine": [12, 11, 13, 12, 14, 11, 12, 9, 10, 8, 11, 10, 9, 11],
+    "manualTotal": null,
+    "scaleMicronsPerPixel": null,
+    "manualMliMicrons": null,
+    "notes": "Counted by Praneeth 2026-06-21 along the test lines from --lines sample-001-low-carbon-steel"
+  },
+  "cases": []
+}
