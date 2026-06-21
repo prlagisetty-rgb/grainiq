@@ -11,5 +11,14 @@
     "manualMliMicrons": null,
     "notes": "Counted by Praneeth 2026-06-21 along the test lines from --lines sample-001-low-carbon-steel"
   },
-  "cases": []
+  "cases": [
+    {
+      "id": "clean-sample",
+      "image": "fixtures/phpsCK1WB.png",
+      "description": "Clean grain-boundary sample (dark etch) — tonight's sanity check",
+      "params": { "method": "threshold", "orientation": "both", "numLines": 7, "sensitivity": 0 },
+      "manualPerLine": [38, 38, 37, 38, 42, 41, 40, 28, 28, 27, 31, 24, 28, 26],
+      "notes": "Counted by Praneeth 2026-06-21 along the 14 test lines from --lines clean-sample; triple points counted as 2 intercepts."
+    }
+  ]
 }

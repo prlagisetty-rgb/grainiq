@@ -12,3 +12,8 @@ supabase/.temp/
 # Project brain — sensitive business strategy, financials & named contacts.
 # Kept on local disk, never committed/pushed.
 CLAUDE.md
+
+# Validation micrographs may be confidential (customer/dissertation samples).
+# Keep image fixtures local; the manifest (numbers only) and harness are tracked.
+validation/fixtures/*
+!validation/fixtures/.gitkeep
