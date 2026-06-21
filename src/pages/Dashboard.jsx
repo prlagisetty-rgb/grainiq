@@ -40,8 +40,10 @@ export default function Dashboard() {
   const fileInputRef = useRef(null)
   const draggingRef = useRef(false)
   const recordedRef = useRef(null)
+  // What to do once feedback is submitted and beta Pro is granted — e.g. run the
+  // export the user was gated on, or load the image they were blocked from.
+  const afterFeedbackRef = useRef(null)
 
-  const [showUpgrade, setShowUpgrade] = useState(false)
   const [billingBusy, setBillingBusy] = useState(false)
   const [billingError, setBillingError] = useState(null)
   const [checkoutPending, setCheckoutPending] = useState(false)
@@ -78,11 +80,20 @@ export default function Dashboard() {
   // falls back to a rule-of-thumb estimate from magnification (1 µm/px at 100x).
   const scale = scaleOverride ?? (magnification > 0 ? 100 / magnification : 1)
 
-  async function loadFile(file) {
+  // Open the feedback form; `after` runs once it's submitted and beta Pro is
+  // granted. This is the single route to Pro during the beta — both the export
+  // gate and the monthly-limit block funnel through it.
+  function requestFeedback(after) {
+    afterFeedbackRef.current = after || null
+    setExportError(null)
+    setShowFeedback(true)
+  }
+
+  async function loadFile(file, bypassLimit = false) {
     setLoadError(null)
     if (!file) return
-    if (!profileLoading && !isPro && remaining <= 0) {
-      setShowUpgrade(true)
+    if (!bypassLimit && !profileLoading && !isPro && remaining <= 0) {
+      requestFeedback(() => loadFile(file, true))
       return
     }
     if (!file.type.startsWith('image/')) {
@@ -181,7 +192,9 @@ export default function Dashboard() {
     recordedRef.current = source
     const automatedMli = result.mliPx ? result.mliPx * micronsPerAnalysisPx : null
     recordAnalysis({ mliMicrons: automatedMli, astmG: astmGrainNumber(automatedMli) }).then((ok) => {
-      if (!ok) setShowUpgrade(true)
+      // Server rejected the usage row (over the monthly limit) — route to the
+      // feedback gate so they can unlock beta Pro and keep going.
+      if (!ok) requestFeedback(null)
     })
   }, [source, result, micronsPerAnalysisPx, recordAnalysis])
 
@@ -437,8 +450,7 @@ export default function Dashboard() {
   function handleExport() {
     if (!result || mliMicrons == null) return
     if (!isPro) {
-      setExportError(null)
-      setShowFeedback(true)
+      requestFeedback(() => runExport(true))
       return
     }
     runExport()
@@ -563,17 +575,16 @@ export default function Dashboard() {
               You&apos;ve used all {limit} free analyses this month
             </h2>
             <p className="mt-2 text-sm text-slate-400">
-              Upgrade to Pro for unlimited analyses — £89/month, cancel anytime.
+              GrainIQ is in beta — share a little feedback to unlock 30 days of unlimited analyses.
             </p>
             <button
-              onClick={handleUpgrade}
-              disabled={billingBusy}
-              className="mt-6 rounded-md bg-teal-500 px-6 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-60"
+              onClick={() => requestFeedback(null)}
+              className="mt-6 rounded-md bg-teal-500 px-6 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400"
             >
-              {billingBusy ? 'Opening checkout…' : 'Upgrade to Pro'}
+              Give feedback &amp; unlock
             </button>
             <p className="mt-4 text-xs text-slate-500">
-              Your free allowance resets on the 1st of each month.
+              Or your free allowance resets on the 1st of each month.
             </p>
           </div>
         ) : !source ? (
@@ -1092,32 +1103,6 @@ export default function Dashboard() {
         />
       </main>
 
-      {showUpgrade && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-8 text-center">
-            <h2 className="text-lg font-semibold text-white">Free limit reached</h2>
-            <p className="mt-2 text-sm text-slate-400">
-              You&apos;ve used all {limit} free analyses this month. Upgrade to Pro for unlimited
-              analyses — £89/month, cancel anytime.
-            </p>
-            <div className="mt-6 flex gap-3">
-              <button
-                onClick={handleUpgrade}
-                disabled={billingBusy}
-                className="flex-1 rounded-md bg-teal-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-60"
-              >
-                {billingBusy ? 'Opening checkout…' : 'Upgrade to Pro'}
-              </button>
-              <button
-                onClick={() => setShowUpgrade(false)}
-                className={`flex-1 ${secondaryButtonClasses}`}
-              >
-                Not now
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {showFeedback && (
         <FeedbackModal
@@ -1126,7 +1111,9 @@ export default function Dashboard() {
           onClose={() => setShowFeedback(false)}
           onSuccess={() => {
             setShowFeedback(false)
-            runExport(true)
+            const after = afterFeedbackRef.current
+            afterFeedbackRef.current = null
+            if (after) after()
           }}
         />
       )}
