@@ -55,6 +55,15 @@ export default function Dashboard() {
   const [sensitivity, setSensitivity] = useState(0)
   const [showBoundaries, setShowBoundaries] = useState(true)
 
+  // Manual intercept correction. correctionMode arms the canvas for click edits;
+  // corrections is keyed by test-line index → { added, removed } positions in
+  // the line's moving coordinate (x for horizontal lines, y for vertical).
+  const [correctionMode, setCorrectionMode] = useState(false)
+  const [corrections, setCorrections] = useState({})
+  // Canvas zoom (CSS only — the attribute resolution is unchanged, and
+  // toCanvasCoords maps via rect.width, so clicks stay accurate at any zoom).
+  const [zoom, setZoom] = useState(1)
+
   // Scale bar calibration: mode 'idle' | 'drawing' | 'measured'
   const [calibration, setCalibration] = useState({ mode: 'idle', line: null, realMicrons: '' })
   const [calibrated, setCalibrated] = useState(null) // { realMicrons, lengthPx }
@@ -115,20 +124,60 @@ export default function Dashboard() {
     [source, numLines, sensitivity, method, orientation],
   )
 
+  // Line geometry is meaningless once a fresh analysis moves the lines, so drop
+  // any corrections whenever the automated result changes.
+  useEffect(() => {
+    setCorrections({})
+  }, [result])
+
+  // The automated result with user corrections layered on. Per line we keep the
+  // auto intercepts the user didn't remove, plus the ones they added; the grain
+  // size is recomputed from the corrected total so edits update results live.
+  const corrected = useMemo(() => {
+    if (!result) return null
+    const directions = {}
+    let total = 0
+    let addedCount = 0
+    let removedCount = 0
+    const lines = result.lines.map((line, i) => {
+      const c = corrections[i]
+      const autoKept = c ? line.intercepts.filter((p) => !c.removed.includes(p)) : line.intercepts
+      const added = c ? c.added : []
+      addedCount += added.length
+      removedCount += c ? c.removed.length : 0
+      const count = autoKept.length + added.length
+      total += count
+      directions[line.orientation] = (directions[line.orientation] ?? 0) + count
+      return { ...line, autoKept, added, count }
+    })
+    return {
+      lines,
+      directions,
+      total,
+      mliPx: total > 0 ? result.totalLengthPx / total : null,
+      addedCount,
+      removedCount,
+      edits: addedCount + removedCount,
+      automatedTotal: result.totalIntercepts,
+    }
+  }, [result, corrections])
+
   // µm represented by one pixel of the (possibly downscaled) analysis image.
   const micronsPerAnalysisPx = source ? scale * source.sampleScale : null
-  const mliMicrons = result?.mliPx ? result.mliPx * micronsPerAnalysisPx : null
+  const mliMicrons = corrected?.mliPx ? corrected.mliPx * micronsPerAnalysisPx : null
   const grainNumber = astmGrainNumber(mliMicrons)
 
   // One analysis = one image loaded; parameter tweaks on the same image are
-  // free. Record on the first computed result for each new source.
+  // free. Record the AUTOMATED result (manual corrections are a user overlay,
+  // not a separate analysis) on the first computed result for each new source.
   useEffect(() => {
     if (!source || !result || recordedRef.current === source) return
     recordedRef.current = source
-    recordAnalysis({ mliMicrons, astmG: grainNumber }).then((ok) => {
+    const automatedMli = result.mliPx ? result.mliPx * micronsPerAnalysisPx : null
+    recordAnalysis({ mliMicrons: automatedMli, astmG: astmGrainNumber(automatedMli) }).then((ok) => {
       if (!ok) setShowUpgrade(true)
     })
-  }, [source, result, mliMicrons, grainNumber, recordAnalysis])
+  }, [source, result, micronsPerAnalysisPx, recordAnalysis])
 
   // Returning from Stripe Checkout: poll until the webhook flips the tier.
   useEffect(() => {
@@ -202,7 +251,18 @@ export default function Dashboard() {
     const lineWidth = Math.max(1.5, source.width / 900)
     const tick = Math.max(6, source.width / 240)
     ctx.lineWidth = lineWidth
-    for (const line of result.lines) {
+    const drawTick = (line, p, horizontal) => {
+      ctx.beginPath()
+      if (horizontal) {
+        ctx.moveTo(p, line.y - tick)
+        ctx.lineTo(p, line.y + tick)
+      } else {
+        ctx.moveTo(line.x - tick, p)
+        ctx.lineTo(line.x + tick, p)
+      }
+      ctx.stroke()
+    }
+    for (const line of corrected.lines) {
       const horizontal = line.orientation === 'horizontal'
       ctx.strokeStyle = '#2dd4bf'
       ctx.beginPath()
@@ -215,18 +275,14 @@ export default function Dashboard() {
       }
       ctx.stroke()
 
+      // Automated intercepts (rose) and user-added intercepts (emerald). When
+      // correcting, ticks are drawn thicker so they're easier to aim at.
+      ctx.lineWidth = correctionMode ? lineWidth * 1.5 : lineWidth
       ctx.strokeStyle = '#fb7185'
-      for (const p of line.intercepts) {
-        ctx.beginPath()
-        if (horizontal) {
-          ctx.moveTo(p, line.y - tick)
-          ctx.lineTo(p, line.y + tick)
-        } else {
-          ctx.moveTo(line.x - tick, p)
-          ctx.lineTo(line.x + tick, p)
-        }
-        ctx.stroke()
-      }
+      for (const p of line.autoKept) drawTick(line, p, horizontal)
+      ctx.strokeStyle = '#34d399'
+      for (const p of line.added) drawTick(line, p, horizontal)
+      ctx.lineWidth = lineWidth
     }
 
     if (calibration.line) {
@@ -252,7 +308,7 @@ export default function Dashboard() {
         ctx.stroke()
       }
     }
-  }, [source, result, showBoundaries, calibration.line])
+  }, [source, result, corrected, correctionMode, showBoundaries, calibration.line])
 
   function toCanvasCoords(e) {
     const canvas = canvasRef.current
@@ -263,7 +319,75 @@ export default function Dashboard() {
     }
   }
 
+  // Click on (or near) a test line: remove the nearest intercept if the click
+  // lands on one, otherwise add a new intercept at that point on the line.
+  function handleCorrectionClick(p) {
+    if (!result) return
+    const tick = Math.max(6, source.width / 240)
+    const alongTol = Math.max(8, tick * 2) // how close to a tick counts as "on" it
+
+    // Smallest gap between adjacent lines of an orientation — used to size the
+    // catch band so a click is assigned to the nearest line with no dead zone
+    // between lines, but a click clearly on one line of a close pair still wins.
+    const minSpacing = (orient) => {
+      const coords = result.lines
+        .filter((l) => l.orientation === orient)
+        .map((l) => (orient === 'horizontal' ? l.y : l.x))
+        .sort((a, b) => a - b)
+      let m = Infinity
+      for (let k = 1; k < coords.length; k++) m = Math.min(m, coords[k] - coords[k - 1])
+      return m
+    }
+
+    let best = null
+    result.lines.forEach((line, i) => {
+      const horizontal = line.orientation === 'horizontal'
+      const perp = horizontal ? Math.abs(p.y - line.y) : Math.abs(p.x - line.x)
+      const along = horizontal ? p.x : p.y
+      const lo = horizontal ? line.x1 : line.y1
+      const hi = horizontal ? line.x2 : line.y2
+      const spacing = minSpacing(line.orientation)
+      // Cover the gap to the next line (0.6×spacing) but never less than tick·3.
+      const perpTol = Number.isFinite(spacing) ? Math.max(tick * 3, spacing * 0.6) : tick * 3
+      if (perp <= perpTol && along >= lo - 2 && along <= hi + 2 && (!best || perp < best.perp)) {
+        best = { i, line, along, perp }
+      }
+    })
+    if (!best) return
+
+    const { i, line, along } = best
+    setCorrections((prev) => {
+      const existing = prev[i] || { added: [], removed: [] }
+      const c = { added: [...existing.added], removed: [...existing.removed] }
+      const autoKept = line.intercepts.filter((pos) => !c.removed.includes(pos))
+
+      let nearest = null
+      for (const pos of autoKept) {
+        const d = Math.abs(pos - along)
+        if (d <= alongTol && (!nearest || d < nearest.d)) nearest = { pos, type: 'auto', d }
+      }
+      for (const pos of c.added) {
+        const d = Math.abs(pos - along)
+        if (d <= alongTol && (!nearest || d < nearest.d)) nearest = { pos, type: 'added', d }
+      }
+
+      if (nearest) {
+        // Click landed on an existing marker → remove it (false positive).
+        if (nearest.type === 'added') c.added = c.added.filter((pos) => pos !== nearest.pos)
+        else c.removed.push(nearest.pos)
+      } else {
+        // Empty stretch → add a missed intercept here.
+        c.added.push(Math.round(along))
+      }
+      return { ...prev, [i]: c }
+    })
+  }
+
   function handlePointerDown(e) {
+    if (correctionMode && calibration.mode !== 'drawing') {
+      handleCorrectionClick(toCanvasCoords(e))
+      return
+    }
     if (calibration.mode !== 'drawing') return
     draggingRef.current = true
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -319,8 +443,18 @@ export default function Dashboard() {
         sensitivity,
         mliMicrons,
         grainNumber,
-        totalIntercepts: result.totalIntercepts,
-        directions: result.directions,
+        totalIntercepts: corrected.total,
+        directions:
+          result.orientation === 'both'
+            ? {
+                horizontal: { intercepts: corrected.directions.horizontal ?? 0 },
+                vertical: { intercepts: corrected.directions.vertical ?? 0 },
+              }
+            : null,
+        automatedIntercepts: corrected.automatedTotal,
+        manualAdded: corrected.addedCount,
+        manualRemoved: corrected.removedCount,
+        manualEdits: corrected.edits,
         totalLengthMm: (result.totalLengthPx * micronsPerAnalysisPx) / 1000,
         detail: result.detail,
         scale,
@@ -696,22 +830,36 @@ export default function Dashboard() {
                       <>
                         <div className="flex justify-between border-t border-slate-800 pt-3 text-sm">
                           <dt className="text-slate-500">Intercepts (horizontal)</dt>
-                          <dd className="text-slate-300">{result.directions.horizontal.intercepts}</dd>
+                          <dd className="text-slate-300">{corrected.directions.horizontal ?? 0}</dd>
                         </div>
                         <div className="flex justify-between text-sm">
                           <dt className="text-slate-500">Intercepts (vertical)</dt>
-                          <dd className="text-slate-300">{result.directions.vertical.intercepts}</dd>
+                          <dd className="text-slate-300">{corrected.directions.vertical ?? 0}</dd>
                         </div>
                         <div className="flex justify-between text-sm">
                           <dt className="text-slate-500">Intercepts (total)</dt>
-                          <dd className="text-slate-300">{result.totalIntercepts}</dd>
+                          <dd className="text-slate-300">{corrected.total}</dd>
                         </div>
                       </>
                     ) : (
                       <div className="flex justify-between border-t border-slate-800 pt-3 text-sm">
                         <dt className="text-slate-500">Intercepts counted</dt>
-                        <dd className="text-slate-300">{result.totalIntercepts}</dd>
+                        <dd className="text-slate-300">{corrected.total}</dd>
                       </div>
+                    )}
+                    {corrected.edits > 0 && (
+                      <>
+                        <div className="flex justify-between text-sm">
+                          <dt className="text-slate-500">Automated count</dt>
+                          <dd className="text-slate-400">{corrected.automatedTotal}</dd>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <dt className="text-emerald-400">Manual corrections</dt>
+                          <dd className="text-emerald-400">
+                            +{corrected.addedCount} / −{corrected.removedCount}
+                          </dd>
+                        </div>
+                      </>
                     )}
                     <div className="flex justify-between text-sm">
                       <dt className="text-slate-500">Total line length</dt>
@@ -752,9 +900,42 @@ export default function Dashboard() {
                   </dl>
                 ) : (
                   <p className="mt-3 text-sm text-amber-400">
-                    No grain boundaries detected — try raising the detection sensitivity.
+                    No grain boundaries detected — try raising the detection sensitivity, or add
+                    intercepts manually below.
                   </p>
                 )}
+
+                {result && (
+                  <div className="mt-4 border-t border-slate-800 pt-3">
+                    <div className="flex items-center justify-between">
+                      <button
+                        onClick={() => setCorrectionMode((m) => !m)}
+                        className={
+                          correctionMode
+                            ? 'rounded-md bg-emerald-500 px-3 py-1.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400'
+                            : secondaryButtonClasses
+                        }
+                      >
+                        {correctionMode ? 'Done correcting' : 'Adjust intercepts'}
+                      </button>
+                      {corrected.edits > 0 && (
+                        <button
+                          onClick={() => setCorrections({})}
+                          className="text-xs font-medium text-slate-400 underline hover:text-slate-300"
+                        >
+                          Reset corrections
+                        </button>
+                      )}
+                    </div>
+                    {correctionMode && (
+                      <p className="mt-2 rounded-md bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+                        Click an empty spot on a test line to add a missed intercept, or click an
+                        existing tick to remove a false positive. The grain size updates instantly.
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <button
                   onClick={handleExport}
                   disabled={mliMicrons == null || exporting}
@@ -788,17 +969,60 @@ export default function Dashboard() {
             </aside>
 
             <section>
-              <canvas
-                ref={canvasRef}
-                onPointerDown={handlePointerDown}
-                onPointerMove={handlePointerMove}
-                onPointerUp={handlePointerUp}
-                className={`h-auto max-w-full touch-none rounded-xl border ${
+              <div className="mb-2 flex items-center gap-2 text-xs text-slate-400">
+                <span className="font-medium">Zoom</span>
+                <button
+                  onClick={() => setZoom((z) => Math.max(1, Math.round((z - 0.5) * 10) / 10))}
+                  disabled={zoom <= 1}
+                  className="rounded border border-slate-700 px-2 py-0.5 text-sm leading-none hover:bg-slate-800 disabled:opacity-40"
+                  aria-label="Zoom out"
+                >
+                  −
+                </button>
+                <span className="w-10 text-center tabular-nums">{Math.round(zoom * 100)}%</span>
+                <button
+                  onClick={() => setZoom((z) => Math.min(5, Math.round((z + 0.5) * 10) / 10))}
+                  disabled={zoom >= 5}
+                  className="rounded border border-slate-700 px-2 py-0.5 text-sm leading-none hover:bg-slate-800 disabled:opacity-40"
+                  aria-label="Zoom in"
+                >
+                  +
+                </button>
+                {zoom !== 1 && (
+                  <button onClick={() => setZoom(1)} className="underline hover:text-slate-200">
+                    Reset
+                  </button>
+                )}
+                {correctionMode && (
+                  <span className="text-slate-500">
+                    Zoom in to place intercepts on closely-spaced lines.
+                  </span>
+                )}
+              </div>
+              <div
+                className={`max-h-[75vh] overflow-auto rounded-xl border ${
                   calibration.mode === 'drawing'
-                    ? 'cursor-crosshair border-teal-500/60'
-                    : 'border-slate-800'
+                    ? 'border-teal-500/60'
+                    : correctionMode
+                      ? 'border-emerald-500/60'
+                      : 'border-slate-800'
                 }`}
-              />
+              >
+                <canvas
+                  ref={canvasRef}
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerUp}
+                  style={{ width: `${zoom * 100}%` }}
+                  className={`block h-auto touch-none ${
+                    calibration.mode === 'drawing'
+                      ? 'cursor-crosshair'
+                      : correctionMode
+                        ? 'cursor-pointer'
+                        : ''
+                  }`}
+                />
+              </div>
               <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-slate-500">
                 <span>
                   <span className="font-semibold text-teal-400">—</span> test lines
@@ -806,6 +1030,11 @@ export default function Dashboard() {
                 <span>
                   <span className="font-semibold text-rose-400">|</span> grain boundary intercepts
                 </span>
+                {corrected?.addedCount > 0 && (
+                  <span>
+                    <span className="font-semibold text-emerald-400">|</span> manually added
+                  </span>
+                )}
                 {showBoundaries && (
                   <span>
                     <span className="font-semibold text-yellow-400">▒</span> detected boundaries

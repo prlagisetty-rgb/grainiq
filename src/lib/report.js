@@ -211,6 +211,12 @@ export function buildReportDoc(d) {
     interceptRows.push(['Intercepts (vertical)', String(d.directions.vertical.intercepts)])
   }
   interceptRows.push(['Intercepts (total)', String(d.totalIntercepts ?? '—')])
+  // When the analyst hand-corrected intercepts, show the automated baseline and
+  // the edits so the report is transparent about what was adjusted.
+  if (d.manualEdits > 0) {
+    interceptRows.push(['Automated count', String(d.automatedIntercepts ?? '—')])
+    interceptRows.push(['Manual corrections', `+${d.manualAdded ?? 0} / -${d.manualRemoved ?? 0}`])
+  }
 
   const resultsItems = [
     ['Mean linear intercept', d.mliMicrons != null ? `${d.mliMicrons.toFixed(2)} µm` : '—'],
