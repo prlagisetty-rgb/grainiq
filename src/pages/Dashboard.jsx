@@ -47,7 +47,7 @@ export default function Dashboard() {
   const [loadError, setLoadError] = useState(null)
   const [dragActive, setDragActive] = useState(false)
 
-  const [method, setMethod] = useState('watershed')
+  const [method, setMethod] = useState('threshold')
   const [orientation, setOrientation] = useState('both')
   const [magnification, setMagnification] = useState(100)
   const [scaleOverride, setScaleOverride] = useState(null)
@@ -595,16 +595,29 @@ export default function Dashboard() {
                   onChange={(e) => setMethod(e.target.value)}
                   className={inputClasses}
                 >
-                  <option value="watershed">Watershed segmentation — recommended</option>
+                  <option value="threshold">Dark threshold — recommended</option>
+                  <option value="watershed">Watershed segmentation</option>
                   <option value="canny">Edge detection (Canny)</option>
-                  <option value="threshold">Dark threshold (legacy)</option>
                 </select>
                 <p className="mt-2 text-xs text-slate-500">
-                  Watershed floods each grain from its centre and finds the complete boundary
-                  network, including low-contrast boundaries that edge detection misses. Polarity
-                  is auto-detected, so dark-etched and bright boundaries (e.g. Barker&apos;s etched
-                  aluminium) both work.
+                  Choose the method that best matches your micrograph. Dark threshold suits most
+                  samples with dark etched boundaries; switch to watershed or Canny for the cases
+                  below.
                 </p>
+                <dl className="mt-2 space-y-1 text-xs text-slate-500">
+                  <div>
+                    <dt className="inline font-medium text-slate-400">Dark threshold</dt>
+                    <dd className="inline"> — recommended for most samples with dark etched boundaries.</dd>
+                  </div>
+                  <div>
+                    <dt className="inline font-medium text-slate-400">Watershed</dt>
+                    <dd className="inline"> — best for large clear grain structures with thick boundaries.</dd>
+                  </div>
+                  <div>
+                    <dt className="inline font-medium text-slate-400">Canny</dt>
+                    <dd className="inline"> — best for variable contrast or Barker&apos;s etched samples.</dd>
+                  </div>
+                </dl>
 
                 <label htmlFor="orientation" className="mt-4 block text-sm font-medium text-slate-300">
                   Test line orientation
