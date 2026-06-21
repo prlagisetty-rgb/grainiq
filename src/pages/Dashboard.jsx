@@ -541,18 +541,12 @@ export default function Dashboard() {
                   })}
                 </span>
               ) : (
-                <>
-                  <span className={`text-sm ${remaining <= 3 ? 'text-amber-400' : 'text-slate-400'}`}>
-                    {usage ?? 0}/{limit} analyses this month
-                  </span>
-                  <button
-                    onClick={handleUpgrade}
-                    disabled={billingBusy}
-                    className="rounded-md bg-teal-500 px-3 py-1.5 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-60"
-                  >
-                    Upgrade to Pro
-                  </button>
-                </>
+                // Direct-purchase entry point hidden during the feedback-gated
+                // beta — Pro is granted via feedback, not bought. handleUpgrade /
+                // startCheckout are kept intact for when we re-enable purchase.
+                <span className={`text-sm ${remaining <= 3 ? 'text-amber-400' : 'text-slate-400'}`}>
+                  {usage ?? 0}/{limit} analyses this month
+                </span>
               ))
             )}
             <span className="text-sm text-slate-400">{user?.email}</span>
