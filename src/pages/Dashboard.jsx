@@ -4,6 +4,7 @@ import { useProfile } from '../hooks/useProfile'
 import { analyzeImage, astmGrainNumber } from '../lib/analysis'
 import { startCheckout, openBillingPortal } from '../lib/billing'
 import BetaBadge from '../components/BetaBadge'
+import FeedbackModal from '../components/FeedbackModal'
 
 // Canny runs on every slider tick, so cap the analysis resolution to keep it
 // interactive. sampleScale corrects the µm conversion for the downscale.
@@ -23,13 +24,17 @@ function lineLength(line) {
 export default function Dashboard() {
   const { user, signOut } = useAuth()
   const {
+    tier,
     isPro,
+    betaProUntil,
+    betaProActive,
     usage,
     remaining,
     limit,
     loading: profileLoading,
     refresh,
     recordAnalysis,
+    submitFeedback,
   } = useProfile()
   const canvasRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -42,6 +47,7 @@ export default function Dashboard() {
   const [checkoutPending, setCheckoutPending] = useState(false)
   const [exportError, setExportError] = useState(null)
   const [exporting, setExporting] = useState(false)
+  const [showFeedback, setShowFeedback] = useState(false)
 
   const [source, setSource] = useState(null) // { canvas, imageData, sampleScale, fileName, width, height }
   const [loadError, setLoadError] = useState(null)
@@ -424,7 +430,21 @@ export default function Dashboard() {
     setCalibration({ mode: 'idle', line: null, realMicrons: '' })
   }
 
-  async function handleExport() {
+  // PDF export is gated behind beta feedback for non-Pro users. handleExport
+  // opens the feedback form; runExport does the actual generation. proOverride
+  // lets a just-granted user export unwatermarked without waiting for the
+  // profile refresh to land in state.
+  function handleExport() {
+    if (!result || mliMicrons == null) return
+    if (!isPro) {
+      setExportError(null)
+      setShowFeedback(true)
+      return
+    }
+    runExport()
+  }
+
+  async function runExport(proOverride) {
     setExportError(null)
     const canvas = canvasRef.current
     if (!canvas || !result || mliMicrons == null) return
@@ -461,7 +481,7 @@ export default function Dashboard() {
         scaleSource: calibrated ? 'Scale bar calibration' : 'Magnification estimate',
         calibrated,
         magnification,
-        isPro,
+        isPro: proOverride ?? isPro,
         analyst: user?.email ?? '',
       })
     } catch (err) {
@@ -487,7 +507,7 @@ export default function Dashboard() {
               <span className="text-sm text-teal-400">Finalising upgrade…</span>
             ) : (
               !profileLoading &&
-              (isPro ? (
+              (tier === 'pro' ? (
                 <>
                   <span className="rounded-full bg-teal-500/15 px-2.5 py-0.5 text-xs font-semibold text-teal-400">
                     Pro
@@ -500,6 +520,14 @@ export default function Dashboard() {
                     Manage billing
                   </button>
                 </>
+              ) : betaProActive ? (
+                <span className="rounded-full bg-teal-500/15 px-2.5 py-0.5 text-xs font-semibold text-teal-400">
+                  Beta Pro · until{' '}
+                  {new Date(betaProUntil).toLocaleDateString('en-GB', {
+                    day: 'numeric',
+                    month: 'short',
+                  })}
+                </span>
               ) : (
                 <>
                   <span className={`text-sm ${remaining <= 3 ? 'text-amber-400' : 'text-slate-400'}`}>
@@ -941,17 +969,16 @@ export default function Dashboard() {
                   disabled={mliMicrons == null || exporting}
                   className="mt-4 w-full rounded-md bg-teal-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {exporting ? 'Generating…' : 'Export report (PDF)'}
+                  {exporting
+                    ? 'Generating…'
+                    : isPro
+                      ? 'Export report (PDF)'
+                      : 'Export report (PDF) — quick feedback first'}
                 </button>
                 {!isPro && mliMicrons != null && (
                   <p className="mt-1.5 text-center text-xs text-slate-500">
-                    Free reports include a watermark.{' '}
-                    <button
-                      onClick={handleUpgrade}
-                      className="font-medium text-teal-400 underline hover:text-teal-300"
-                    >
-                      Upgrade
-                    </button>
+                    Beta: answer a few questions to unlock the report and 30 days of unlimited
+                    analyses.
                   </p>
                 )}
                 {exportError && (
@@ -1090,6 +1117,18 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+      )}
+
+      {showFeedback && (
+        <FeedbackModal
+          submitFeedback={submitFeedback}
+          context={{ method: result?.method, mliMicrons, astmG: grainNumber }}
+          onClose={() => setShowFeedback(false)}
+          onSuccess={() => {
+            setShowFeedback(false)
+            runExport(true)
+          }}
+        />
       )}
     </div>
   )

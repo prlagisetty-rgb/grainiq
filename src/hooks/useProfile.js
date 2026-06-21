@@ -16,13 +16,14 @@ function monthStartIso() {
 export function useProfile() {
   const { user } = useAuth()
   const [tier, setTier] = useState(null)
+  const [betaProUntil, setBetaProUntil] = useState(null)
   const [usage, setUsage] = useState(null)
   const [loading, setLoading] = useState(true)
 
   const refresh = useCallback(async () => {
     if (!user) return null
     const [profileRes, countRes] = await Promise.all([
-      supabase.from('profiles').select('tier').eq('id', user.id).single(),
+      supabase.from('profiles').select('tier, beta_pro_until').eq('id', user.id).single(),
       supabase
         .from('analyses')
         .select('id', { count: 'exact', head: true })
@@ -30,6 +31,7 @@ export function useProfile() {
     ])
     const fetchedTier = profileRes.data?.tier ?? 'free'
     setTier(fetchedTier)
+    setBetaProUntil(profileRes.data?.beta_pro_until ?? null)
     setUsage(countRes.count ?? 0)
     setLoading(false)
     return fetchedTier
@@ -38,6 +40,29 @@ export function useProfile() {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // Record beta feedback; the RPC grants 30 days of Pro and returns the new
+  // expiry. Refresh so isPro/remaining reflect the grant immediately.
+  const submitFeedback = useCallback(
+    async (f) => {
+      if (!user) return { ok: false, error: 'Not signed in.' }
+      const { data, error } = await supabase.rpc('submit_feedback', {
+        p_user_type: f.userType,
+        p_material: f.material ?? null,
+        p_accuracy: f.accuracy,
+        p_improvement: f.improvement ?? null,
+        p_would_pay: f.wouldPay,
+        p_pay_amount: f.payAmount ?? null,
+        p_method: f.method ?? null,
+        p_mli_microns: f.mliMicrons ?? null,
+        p_astm_g: f.astmG ?? null,
+      })
+      if (error) return { ok: false, error: error.message }
+      await refresh()
+      return { ok: true, until: data }
+    },
+    [user, refresh],
+  )
 
   // Inserts a usage row; RLS rejects it once a free user is over the limit,
   // so the count cannot be bypassed client-side. Returns false when blocked.
@@ -59,8 +84,21 @@ export function useProfile() {
     [user, refresh],
   )
 
-  const isPro = tier === 'pro'
+  const betaProActive = betaProUntil ? new Date(betaProUntil) > new Date() : false
+  const isPro = tier === 'pro' || betaProActive
   const remaining = isPro ? Infinity : Math.max(0, FREE_MONTHLY_LIMIT - (usage ?? 0))
 
-  return { tier, isPro, usage, remaining, limit: FREE_MONTHLY_LIMIT, loading, refresh, recordAnalysis }
+  return {
+    tier,
+    isPro,
+    betaProUntil,
+    betaProActive,
+    usage,
+    remaining,
+    limit: FREE_MONTHLY_LIMIT,
+    loading,
+    refresh,
+    recordAnalysis,
+    submitFeedback,
+  }
 }
